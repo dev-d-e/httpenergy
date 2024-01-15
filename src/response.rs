@@ -1,10 +1,10 @@
-use crate::slice_index_into_str;
+use crate::common::*;
 use std::collections::HashMap;
 use std::ptr;
 
-///Represents an HTTP response.
+///Represents units of an HTTP response.
 #[derive(Debug)]
-pub struct Response {
+pub struct ResponseUnits {
     origin: *const [u8],
     version: String,
     _version_index: (usize, usize),
@@ -12,14 +12,15 @@ pub struct Response {
     _status_code_index: (usize, usize),
     reason: String,
     _reason_index: (usize, usize),
-    fields: HashMap<String, Vec<u8>>,
-    _fields_index: Vec<(usize, usize, usize, usize)>,
+    headers: HashMap<String, (usize, usize)>,
+    _headers_index: Vec<(usize, usize, usize, usize)>,
     body: usize,
+    err: bool,
 }
 
-impl Response {
+impl ResponseUnits {
     fn new(origin: &[u8]) -> Self {
-        Response {
+        ResponseUnits {
             origin,
             version: String::new(),
             _version_index: (0, 0),
@@ -27,9 +28,10 @@ impl Response {
             _status_code_index: (0, 0),
             reason: String::new(),
             _reason_index: (0, 0),
-            fields: HashMap::new(),
-            _fields_index: Vec::new(),
+            headers: HashMap::new(),
+            _headers_index: Vec::new(),
             body: 0,
+            err: false,
         }
     }
 
@@ -45,99 +47,128 @@ impl Response {
         }
     }
 
-    fn field_index(&mut self, index: (usize, usize, usize, usize)) {
-        self._fields_index.push(index);
+    fn header_index(&mut self, index0: usize, index1: usize, index2: usize, index3: usize) {
+        self._headers_index.push((index0, index1, index2, index3));
     }
 
-    pub fn version(&mut self) -> &String {
+    ///Returns a slice to version value.
+    pub fn version(&mut self) -> &str {
         if self.version.is_empty() {
             let index = self._version_index;
             let s = self.origin();
-            self.version = slice_index_into_str(s, index);
+            self.version = slice_index_into_str(s, index.0, index.1);
         }
         &self.version
     }
 
-    pub fn status_code(&mut self) -> &String {
+    ///Returns a slice to status-code.
+    pub fn status_code(&mut self) -> &str {
         if self.status_code.is_empty() {
             let index = self._status_code_index;
             let s = self.origin();
-            self.status_code = slice_index_into_str(s, index);
+            self.status_code = slice_index_into_str(s, index.0, index.1);
         }
         &self.status_code
     }
 
-    pub fn reason(&mut self) -> &String {
+    ///Returns a slice to reason-phrase.
+    pub fn reason(&mut self) -> &str {
         if self.reason.is_empty() {
             let index = self._reason_index;
             let s = self.origin();
-            self.reason = slice_index_into_str(s, index);
+            self.reason = slice_index_into_str(s, index.0, index.1);
         }
         &self.reason
     }
 
-    pub fn field(&mut self, k: &str) -> Option<&Vec<u8>> {
-        if !self.fields.contains_key(k) {
-            let s = unsafe { self.origin.as_ref()? };
-            let fi = &mut self._fields_index;
-            let f = &mut self.fields;
-            while let Some(n) = fi.pop() {
-                let t = slice_index_into_str(s, (n.0, n.1));
-                let mut v = Vec::new();
-                v.extend_from_slice(&s[n.2..n.3]);
-                if t == k {
-                    f.insert(t, v);
-                    break;
-                } else {
-                    f.insert(t, v);
-                }
-            }
-        }
-        return self.fields.get(k);
+    units_header_body!();
+}
+
+///Hold an HTTP response bytes and `ResponseUnits`.
+#[derive(Debug)]
+pub struct Response(ResponseUnits, Vec<u8>);
+
+impl Response {
+    fn new(bytes: Vec<u8>) -> Self {
+        Response(ResponseUnits::new(&bytes), bytes)
+    }
+
+    ///Returns a mutable reference to `ResponseUnits`.
+    pub fn units(&mut self) -> &mut ResponseUnits {
+        &mut self.0
+    }
+
+    ///Returns a reference to bytes.
+    pub fn as_bytes(&self) -> &Vec<u8> {
+        &self.1
+    }
+
+    ///Returns bytes. This consumes the `Response`.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.1
     }
 }
 
-///Builder can parse response bytes to `Response`.
+///Builder can parse response bytes to `ResponseUnits` or `Response`.
 pub struct ResponseBuilder {
     parser: Parser,
 }
 
 impl ResponseBuilder {
+    ///Creates a new `ResponseBuilder`.
     pub fn new() -> Self {
         ResponseBuilder {
             parser: Parser::new(),
         }
     }
 
-    pub fn from_bytes(&mut self, bytes: &[u8]) -> Response {
-        let mut response = Response::new(bytes);
-        self.parser.accept_response(&mut response);
-        response
+    ///Parse bytes to `ResponseUnits`.
+    pub fn from_bytes(&mut self, bytes: &[u8]) -> ResponseUnits {
+        let mut units = ResponseUnits::new(bytes);
+        self.parser.accept_units(&mut units);
+        units.err = self.parser.err;
+        units
+    }
+
+    ///Parse bytes to `Response`.
+    pub fn from_vec(&mut self, bytes: Vec<u8>) -> Response {
+        let mut r = Response::new(bytes);
+        self.parser.accept_units(&mut r.0);
+        r
+    }
+
+    ///Parse bytes to `Response`.
+    pub fn from_string(&mut self, str: String) -> Response {
+        self.from_vec(str.into_bytes())
     }
 }
 
 struct Parser {
     current_function: fn(&mut Parser),
+    post_separator_function: fn(&mut Parser),
     b: u8,
     n: usize,
-    field_index: (usize, usize, usize),
-    response: *mut Response,
+    header_index: (usize, usize, usize),
+    units: *mut ResponseUnits,
+    err: bool,
 }
 
 impl Parser {
     fn new() -> Self {
         Parser {
             current_function: Self::version_first,
+            post_separator_function: Self::version_first,
             b: 0,
             n: 0,
-            field_index: (0, 0, 0),
-            response: ptr::null_mut(),
+            header_index: (0, 0, 0),
+            units: ptr::null_mut(),
+            err: false,
         }
     }
 
-    fn accept_response(&mut self, response: &mut Response) {
-        self.response = response;
-        let o = response.origin();
+    fn accept_units(&mut self, units: &mut ResponseUnits) {
+        self.units = units;
+        let o = units.origin();
         for i in o {
             self.accept(*i);
         }
@@ -149,13 +180,13 @@ impl Parser {
         self.n += 1;
     }
 
-    fn response(&mut self) -> &mut Response {
+    fn units(&mut self) -> &mut ResponseUnits {
         unsafe {
-            match self.response.as_mut() {
+            match self.units.as_mut() {
                 Some(r) => r,
                 None => {
-                    self.response = &mut Response::new(b"");
-                    &mut *self.response
+                    self.units = &mut ResponseUnits::new(b"");
+                    &mut *self.units
                 }
             }
         }
@@ -163,34 +194,34 @@ impl Parser {
 
     fn version_first(&mut self) {
         let b = self.b;
-        if b == b'\r' || b == b'\n' {
+        if b.is_ascii_alphanumeric() {
+            self.units()._version_index.0 = self.n;
+            self.current_function = Self::version_tail;
         } else {
-            if b.is_ascii_alphanumeric() {
-                self.response()._version_index.0 = self.n;
-                self.current_function = Self::version_tail;
-            } else {
-            }
+            self.err = true;
         }
     }
 
     fn version_tail(&mut self) {
         let b = self.b;
-        if b.is_ascii_alphanumeric() || b == b'.' {
+        if b.is_ascii_alphanumeric() || b == DOT {
         } else {
-            self.response()._version_index.1 = self.n;
-            if b == b' ' {
-                self.current_function = Self::status_code_first;
-                return;
-            }
+            self.units()._version_index.1 = self.n;
+            self.post_separator_function = Self::status_code_first;
+            self.current_function = Self::space;
+            self.space();
         }
     }
+
+    space_cr_lf!();
 
     fn status_code_first(&mut self) {
         let b = self.b;
         if b.is_ascii_digit() {
-            self.response()._status_code_index.0 = self.n;
+            self.units()._status_code_index.0 = self.n;
             self.current_function = Self::status_code_tail;
         } else {
+            self.err = true;
         }
     }
 
@@ -198,118 +229,31 @@ impl Parser {
         let b = self.b;
         if b.is_ascii_digit() {
         } else {
-            self.response()._status_code_index.1 = self.n;
-            if b == b' ' {
-                self.current_function = Self::reason_first;
-                return;
-            }
+            self.units()._status_code_index.1 = self.n;
+            self.post_separator_function = Self::reason_first;
+            self.current_function = Self::space;
+            self.space();
         }
     }
 
     fn reason_first(&mut self) {
         let b = self.b;
-        if b.is_ascii_graphic() {
-            self.response()._reason_index.0 = self.n;
-            self.current_function = Self::reason_tail;
-        } else {
+        self.units()._reason_index.0 = self.n;
+        self.current_function = Self::reason_tail;
+        if is_crlf(b) {
+            self.reason_tail();
         }
     }
 
     fn reason_tail(&mut self) {
         let b = self.b;
-        if b.is_ascii_graphic() {
-        } else {
-            self.response()._reason_index.1 = self.n;
-            self.current_function = Self::cr_behind_reason;
-            self.cr_behind_reason();
+        if is_crlf(b) {
+            self.units()._reason_index.1 = self.n;
+            self.post_separator_function = Self::header_name_first;
+            self.current_function = Self::cr;
+            self.cr();
         }
     }
 
-    fn cr_behind_reason(&mut self) {
-        let b = self.b;
-        if b == b'\r' {
-            self.current_function = Self::lf_behind_reason;
-        } else if b == b'\n' {
-        }
-    }
-
-    fn lf_behind_reason(&mut self) {
-        let b = self.b;
-        if b == b'\n' {
-            self.current_function = Self::field_name_first;
-        } else if b == b'\r' {
-        }
-    }
-
-    fn field_name_first(&mut self) {
-        let b = self.b;
-        if b.is_ascii_alphabetic() {
-            self.field_index.0 = self.n;
-            self.current_function = Self::field_name_tail;
-        } else {
-        }
-    }
-
-    fn field_name_tail(&mut self) {
-        let b = self.b;
-        if b.is_ascii_alphanumeric() || b == b'-' {
-        } else if b == b':' {
-            self.field_index.1 = self.n;
-            self.current_function = Self::field_value_first;
-        } else {
-        }
-    }
-
-    fn field_value_first(&mut self) {
-        let b = self.b;
-        if b.is_ascii_whitespace() {
-        } else if b.is_ascii_graphic() {
-            self.field_index.2 = self.n;
-            self.current_function = Self::field_value_tail;
-        } else {
-        }
-    }
-
-    fn field_value_tail(&mut self) {
-        let b = self.b;
-        if b.is_ascii_graphic() {
-        } else if b.is_ascii_whitespace() || b == b'\r' {
-            let f = (
-                self.field_index.0,
-                self.field_index.1,
-                self.field_index.2,
-                self.n,
-            );
-            self.response().field_index(f);
-            if b == b'\r' {
-                self.current_function = Self::cr_behind_field;
-                return;
-            }
-        } else {
-        }
-    }
-
-    fn cr_behind_field(&mut self) {
-        let b = self.b;
-        if b == b'\r' {
-            self.current_function = Self::lf_behind_field;
-        } else if b == b'\n' {
-        }
-    }
-
-    fn lf_behind_field(&mut self) {
-        let b = self.b;
-        if b == b'\n' {
-            self.current_function = Self::body_first;
-        } else if b == b'\r' {
-        } else {
-        }
-    }
-
-    fn body_first(&mut self) {
-        self.response().body = self.n;
-        self.current_function = Self::body_tail;
-    }
-
-    fn body_tail(&mut self) {}
+    parse_headers_body!(units);
 }
