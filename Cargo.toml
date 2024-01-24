@@ -6,6 +6,5 @@ edition = "2021"
 
 [dependencies]
 bytes = "*"
-lazy_static = "*"
 time = { version = "*", features = ["macros", "formatting", "parsing", "local-offset", "serde"] }
 utf8parse = "*"
