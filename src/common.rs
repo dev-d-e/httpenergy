@@ -22,6 +22,8 @@ pub(crate) fn is_whitespace(b: u8) -> bool {
     b == SPACE || b == HTAB
 }
 
+pub(crate) const VERSION: &str = "HTTP/1.1";
+
 #[inline]
 pub(crate) fn trim_whitespace(buf: &[u8], mut index0: usize, mut index1: usize) -> (usize, usize) {
     let mut i = index0;
@@ -32,7 +34,7 @@ pub(crate) fn trim_whitespace(buf: &[u8], mut index0: usize, mut index1: usize) 
         }
         i += 1;
     }
-    let mut i = index1;
+    i = index1;
     while i > index0 {
         i -= 1;
         if !is_whitespace(buf[i]) {
@@ -59,6 +61,15 @@ impl StrWrapper {
     }
 }
 
+pub(crate) fn to_str(mut iter: impl Iterator<Item = u8>) -> String {
+    let mut p = utf8parse::Parser::new();
+    let mut s = StrWrapper::new();
+    while let Some(b) = iter.next() {
+        p.advance(&mut s, b);
+    }
+    s.0
+}
+
 pub(crate) fn into_str(buf: &[u8]) -> String {
     let mut p = utf8parse::Parser::new();
     let mut s = StrWrapper::new();
@@ -66,12 +77,4 @@ pub(crate) fn into_str(buf: &[u8]) -> String {
         p.advance(&mut s, *b);
     }
     s.0
-}
-
-pub(crate) fn slice_index_into_str(buf: &[u8], index0: usize, index1: usize) -> String {
-    if index1 > index0 {
-        into_str(&buf[index0..index1])
-    } else {
-        String::new()
-    }
 }
