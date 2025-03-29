@@ -78,3 +78,11 @@ pub(crate) fn into_str(buf: &[u8]) -> String {
     }
     s.0
 }
+
+use bytes::{Buf, BufMut};
+
+pub(crate) fn get_bytes(n: usize, buf: &mut impl Buf) -> Vec<u8> {
+    let mut vec = Vec::new();
+    vec.put(buf.take(n));
+    vec
+}
