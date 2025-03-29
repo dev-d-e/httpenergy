@@ -17,6 +17,7 @@
 mod common;
 #[macro_use]
 mod request;
+pub mod h2;
 mod response;
 
 pub use request::*;
