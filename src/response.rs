@@ -1,227 +1,234 @@
 use crate::common::*;
-use std::collections::HashMap;
+use crate::{Entity, WriteByte};
+use getset::{Getters, MutGetters, Setters};
+use std::ops::{Deref, DerefMut};
 
-///Parse bytes to `ResponseUnits`.
-pub fn new_response_units(bytes: &Vec<u8>) -> ResponseUnits {
-    let mut units = ResponseUnits::new();
-    units.build(bytes);
-    units
-}
-
-///Parse bytes to `Response`.
-pub fn to_response(bytes: Vec<u8>) -> Response {
-    let mut response = Response::new(bytes);
-    response.build();
-    response
-}
-
-///Parse bytes to `Response`.
-pub fn string_to_response(str: String) -> Response {
-    to_response(str.into_bytes())
-}
-
-///Pack sth into `Response`.
-pub fn pack_response(status_code: &str) -> Response {
-    let mut response = Response::new_pack();
-    response.set_status_code(status_code);
-    response.set_version(VERSION);
-    response
-}
-
-///Represents units of an HTTP response.
-#[derive(Debug)]
-pub struct ResponseUnits {
+///Represents an HTTP/1.1 response.
+#[derive(Getters, Setters)]
+pub struct H1Response {
+    #[getset(get = "pub", set = "pub")]
     version: String,
+    #[getset(get = "pub", set = "pub")]
     status_code: String,
+    #[getset(get = "pub", set = "pub")]
     reason: Vec<u8>,
-    headers: HashMap<String, (usize, usize)>,
-    body: usize,
-    err: bool,
-    build_context: Option<BuildContext>,
+    headers_body: Entity,
 }
 
-impl ResponseUnits {
-    fn new() -> Self {
-        ResponseUnits {
-            version: String::new(),
+impl Deref for H1Response {
+    type Target = Entity;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.headers_body
+    }
+}
+
+impl DerefMut for H1Response {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.headers_body
+    }
+}
+
+impl std::fmt::Debug for H1Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H1Response")
+            .field("version", &self.version)
+            .field("status_code", &self.status_code)
+            .field("reason len", &self.reason.len())
+            .field("headers", self.headers_body.headers())
+            .field("body len", &self.headers_body.body().len())
+            .field("err", &self.headers_body.err())
+            .finish()
+    }
+}
+
+impl H1Response {
+    ///Creates.
+    pub fn new() -> Self {
+        Self {
+            version: VERSION.to_string(),
             status_code: String::new(),
             reason: Vec::new(),
-            headers: HashMap::new(),
-            body: 0,
-            err: false,
-            build_context: Some(BuildContext::new()),
+            headers_body: Entity::new(),
         }
     }
 
-    fn from_context(&mut self, context: &mut BuildContext, buf: &[u8]) {
-        if self.version.is_empty() {
-            self.version = to_str(context.version_vec.drain(..));
+    ///Creates with status code.
+    pub fn with_status_code(status_code: &str) -> H1Response {
+        Self {
+            version: VERSION.to_string(),
+            status_code: status_code.to_string(),
+            reason: Vec::new(),
+            headers_body: Entity::new(),
         }
-        if self.status_code.is_empty() {
-            self.status_code = to_str(context.status_code_vec.drain(..));
-        }
-
-        //The header value does not include leading or trailing whitespace.
-        let headers = &mut context.headers;
-        for h in headers.drain(..) {
-            let v = trim_whitespace(buf, h.1, h.2);
-            self.headers.insert(h.0, v);
-        }
-
-        self.body = context.body;
-        self.err = context.err;
     }
 
-    ///Returns a slice to version value.
-    pub fn version(&mut self) -> &str {
-        &self.version
+    ///Exports an HTTP/1.1 message.
+    pub fn export(&self, writer: &mut impl WriteByte) {
+        writer.put_all(self.version.as_bytes());
+        writer.put(SPACE);
+        writer.put_all(self.status_code.as_bytes());
+        writer.put(SPACE);
+        writer.put_all(&self.reason);
+        writer.put(CR);
+        writer.put(LF);
+        self.headers_body.export(writer);
     }
+}
 
-    ///Returns a slice to status-code.
-    pub fn status_code(&mut self) -> &str {
-        &self.status_code
-    }
+///Represents units of an HTTP/1.1 response.
+pub struct H1ResponseUnits {
+    ptr: *const u8,
+    len: usize,
+    build_context: BuildContext,
+}
 
-    ///Returns a slice to reason-phrase.
-    pub fn reason(&mut self) -> &Vec<u8> {
-        &self.reason
+impl H1ResponseUnits {
+    ///Creates with bytes.
+    pub fn new(s: &[u8]) -> Self {
+        let mut o = Self {
+            ptr: s.as_ptr(),
+            len: s.len(),
+            build_context: BuildContext::new(),
+        };
+        o.build();
+        o
     }
 
     units_header_body!();
-}
-
-///Represents an HTTP response. Hold response bytes.
-#[derive(Debug)]
-pub struct Response {
-    version: String,
-    status_code: String,
-    reason: Vec<u8>,
-    headers: HashMap<String, Vec<u8>>,
-    body: Vec<u8>,
-    err: bool,
-    bytes: Vec<u8>,
-    build_context: Option<BuildContext>,
-}
-
-impl Response {
-    fn new(bytes: Vec<u8>) -> Self {
-        Response {
-            version: String::new(),
-            status_code: String::new(),
-            reason: Vec::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-            err: false,
-            bytes,
-            build_context: Some(BuildContext::new()),
-        }
-    }
-
-    fn new_pack() -> Self {
-        Response {
-            version: String::new(),
-            status_code: String::new(),
-            reason: Vec::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-            err: false,
-            bytes: Vec::new(),
-            build_context: None,
-        }
-    }
-
-    fn from_context(&mut self, context: &mut BuildContext) {
-        if self.version.is_empty() {
-            self.version = to_str(context.version_vec.drain(..));
-        }
-        if self.status_code.is_empty() {
-            self.status_code = to_str(context.status_code_vec.drain(..));
-        }
-        if self.reason.is_empty() {
-            self.reason = context.reason.drain(..).collect();
-        }
-
-        //The header value does not include leading or trailing whitespace.
-        let headers = &mut context.headers;
-        let mut n = 0;
-        for h in headers.iter_mut() {
-            if n < h.2 {
-                n = h.2;
-            }
-            (h.1, h.2) = trim_whitespace(&self.bytes, h.1, h.2);
-        }
-
-        if n > 0 {
-            let mut vec: Vec<u8> = self.bytes.drain(..n).collect();
-            while let Some(h) = headers.pop() {
-                let v = vec.split_off(h.2);
-                drop(v);
-                let v = vec.split_off(h.1);
-                self.headers.insert(h.0, v);
-            }
-            drop(vec);
-        }
-
-        if context.body > 0 && context.body >= n {
-            n = context.body - n;
-            self.body = self.bytes.split_off(n);
-            self.bytes.clear();
-        }
-
-        self.err = context.err;
-    }
-
-    ///Set version value.
-    pub fn set_version(&mut self, version: &str) {
-        self.version.clear();
-        self.version.push_str(version);
-    }
 
     ///Returns a slice to version value.
-    pub fn version(&mut self) -> &str {
-        &self.version
-    }
-
-    ///Set status-code.
-    pub fn set_status_code(&mut self, status_code: &str) {
-        self.status_code.clear();
-        self.status_code.push_str(status_code);
+    pub fn version(&self) -> &[u8] {
+        &self.build_context.version_vec
     }
 
     ///Returns a slice to status-code.
-    pub fn status_code(&mut self) -> &str {
-        &self.status_code
-    }
-
-    ///Set reason-phrase.
-    pub fn set_reason(&mut self, reason: &[u8]) {
-        self.reason.clear();
-        self.reason.extend_from_slice(reason);
+    pub fn status_code(&self) -> &[u8] {
+        &self.build_context.status_code_vec
     }
 
     ///Returns a slice to reason-phrase.
-    pub fn reason(&mut self) -> &Vec<u8> {
-        &self.reason
+    pub fn reason(&self) -> &[u8] {
+        &self.build_context.reason
     }
 
-    ///Pack bytes.
-    pub fn pack(&mut self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.extend_from_slice(self.version.as_bytes());
-        vec.push(SPACE);
-        vec.extend_from_slice(self.status_code.as_bytes());
-        vec.push(SPACE);
-        vec.extend_from_slice(&self.reason);
-        vec.push(CR);
-        vec.push(LF);
-        self.pack_headers_body(&mut vec);
-        vec
-    }
+    ///Copies bytes from self to response.
+    pub fn copy_to_response(mut self, response: &mut H1Response) {
+        if !self.is_finish() {
+            self.build();
+        }
 
-    header_body!();
+        if response.version.is_empty() {
+            response.set_version(into_str(self.version()));
+        }
+        if response.status_code.is_empty() {
+            response.set_status_code(into_str(self.status_code()));
+        }
+        if response.reason.is_empty() {
+            response.set_reason(self.reason().to_vec());
+        }
+
+        let buf = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+
+        let m = response.headers_body.headers_mut();
+        //The header value does not include leading or trailing whitespace.
+        for (a, b, c) in self.build_context.headers.drain(..) {
+            let (b, c) = trim_whitespace(buf, b, c);
+            if let Some(s) = buf.get(b..c) {
+                m.add_field(to_str(a.into_iter()), s.to_vec());
+            }
+        }
+
+        if let Some(body) = self.body() {
+            response.headers_body.body_mut().extend_from_slice(body);
+        }
+
+        response.headers_body.set_err(self.is_err());
+    }
 }
 
-#[derive(Debug)]
+///Represents a response decoder. Hold response bytes.
+#[derive(Getters, MutGetters)]
+pub struct H1ResponseDecoder {
+    buffer: Vec<u8>,
+    #[getset(get = "pub", get_mut = "pub")]
+    units: H1ResponseUnits,
+    #[getset(get = "pub")]
+    response: H1Response,
+}
+
+impl H1ResponseDecoder {
+    ///Creates with bytes.
+    pub fn new(buffer: Vec<u8>) -> Self {
+        let units = H1ResponseUnits::new(&buffer);
+        let mut o = Self {
+            buffer,
+            units,
+            response: H1Response::new(),
+        };
+        o.units.set_slice(&o.buffer);
+        o
+    }
+
+    ///Splits bytes from self to response.
+    pub fn to_response(mut self) -> H1Response {
+        if !self.units.is_finish() {
+            self.units.build();
+        }
+
+        if self.response.version.is_empty() {
+            self.response.set_version(into_str(self.units.version()));
+        }
+        if self.response.status_code.is_empty() {
+            self.response
+                .set_status_code(into_str(self.units.status_code()));
+        }
+        if self.response.reason.is_empty() {
+            self.response.set_reason(self.units.reason().to_vec());
+        }
+
+        //The header value does not include leading or trailing whitespace.
+        let headers = &mut self.units.build_context.headers;
+        let mut n = 0;
+        headers.iter().for_each(|h| {
+            if n < h.2 {
+                n = h.2;
+            }
+        });
+
+        let body = self.units.position();
+        if body > 0 && body >= n {
+            *self.response.headers_body.body_mut() = self.buffer.split_off(body);
+        }
+
+        self.buffer.truncate(n);
+
+        let headers = &mut self.units.build_context.headers;
+        let m = self.response.headers_body.headers_mut();
+        while let Some((a, b, c)) = headers.pop() {
+            let (b, c) = trim_whitespace(&self.buffer, b, c);
+            self.buffer.truncate(c);
+            let v = self.buffer.split_off(b);
+            m.add_field(to_str(a.into_iter()), v);
+        }
+
+        self.response.headers_body.set_err(self.units.is_err());
+
+        self.response
+    }
+
+    ///Copies bytes from self to response.
+    pub fn copy_to_response(mut self) -> (H1Response, Vec<u8>) {
+        if !self.units.is_finish() {
+            self.units.build();
+        }
+        self.units.copy_to_response(&mut self.response);
+        (self.response, self.buffer)
+    }
+}
+
 struct BuildContext {
     current_function: fn(&mut BuildContext),
     post_separator_function: fn(&mut BuildContext),
@@ -232,17 +239,17 @@ struct BuildContext {
     reason: Vec<u8>,
     header_name: Vec<u8>,
     header_value_index: usize,
-    headers: Vec<(String, usize, usize)>,
+    headers: Vec<(Vec<u8>, usize, usize)>,
     body: usize,
-    search_header_name: Option<String>,
+    search_header_name: Option<Vec<u8>>,
     suspend: bool,
     finish: bool,
-    err: bool,
+    err: Vec<usize>,
 }
 
 impl BuildContext {
     fn new() -> Self {
-        BuildContext {
+        Self {
             current_function: version_first,
             post_separator_function: version_first,
             b: 0,
@@ -257,8 +264,23 @@ impl BuildContext {
             search_header_name: None,
             suspend: false,
             finish: false,
-            err: false,
+            err: Vec::new(),
         }
+    }
+
+    fn set_search(&mut self, name: Vec<u8>) {
+        self.search_header_name.replace(name);
+    }
+
+    fn reset(&mut self) {
+        self.search_header_name.take();
+        if self.suspend {
+            self.suspend = false;
+        }
+    }
+
+    fn find_header(&mut self, k: &[u8]) -> Option<(usize, usize)> {
+        self.headers.iter().find(|a| a.0 == k).map(|r| (r.1, r.2))
     }
 }
 
@@ -270,13 +292,13 @@ fn version_first(context: &mut BuildContext) {
         context.version_vec.push(b);
         context.current_function = version_tail;
     } else {
-        context.err = true;
+        context.err.push(context.n);
     }
 }
 
 fn version_tail(context: &mut BuildContext) {
     let b = context.b;
-    if b.is_ascii_alphanumeric() || b == DOT {
+    if b.is_ascii_alphanumeric() || b == DOT || b == SLASH {
         context.version_vec.push(b);
     } else {
         context.post_separator_function = status_code_first;
@@ -293,7 +315,7 @@ fn status_code_first(context: &mut BuildContext) {
         context.status_code_vec.push(b);
         context.current_function = status_code_tail;
     } else {
-        context.err = true;
+        context.err.push(context.n);
     }
 }
 
