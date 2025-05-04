@@ -8,9 +8,13 @@ pub(crate) const HTAB: u8 = 9;
 
 pub(crate) const COLON: u8 = b':';
 
-pub(crate) const DOT: u8 = b'.';
+pub(crate) const COMMA: u8 = b',';
 
 pub(crate) const HYPHEN: u8 = b'-';
+
+pub(crate) const DOT: u8 = b'.';
+
+pub(crate) const SLASH: u8 = b'/';
 
 #[inline]
 pub(crate) fn is_crlf(b: u8) -> bool {
@@ -77,12 +81,4 @@ pub(crate) fn into_str(buf: &[u8]) -> String {
         p.advance(&mut s, *b);
     }
     s.0
-}
-
-use bytes::{Buf, BufMut};
-
-pub(crate) fn get_bytes(n: usize, buf: &mut impl Buf) -> Vec<u8> {
-    let mut vec = Vec::new();
-    vec.put(buf.take(n));
-    vec
 }
