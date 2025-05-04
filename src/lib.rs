@@ -1,25 +1,36 @@
 //!A library for parsing HTTP request and response.
 //!
 //!```
-//!use httpenergy::{to_request, Request};
-//!use httpenergy::{to_response, Response};
+//!use httpenergy::{H1Request, H1RequestUnits, H1RequestDecoder};
 //!
-//!let request = to_request();
-//!request.method();
+//!let request = H1Request::with_method_target("GET", "/");
+//!let mut s = Vec::new();
+//!request.export(&mut s);
 //!
-//!let response = to_response();
-//!response.status_code();
+//!let units=H1RequestUnits::new(&s);
+//!let mut r =H1Request::new();
+//!units.copy_to_request(&mut r);
+//!println!("H1RequestUnits: {:?}", r.method());
+//!
+//!let decoder = H1RequestDecoder::new(s);
+//!let r2 =decoder.to_request();
+//!println!("H1RequestDecoder: {:?}", r2.method());
+//!
 //!```
 //!
 
 #![allow(dead_code)]
 
 mod common;
+pub mod h2;
+mod io;
+mod prty;
 #[macro_use]
 mod request;
-pub mod h2;
 mod response;
 
+pub use io::*;
+pub use prty::*;
 pub use request::*;
 pub use response::*;
 
@@ -29,44 +40,46 @@ mod tests {
 
     #[test]
     fn test_request() {
-        let mut s = Vec::from(
-            "GET / HTTP1.1\r\nAccept: text/*, text/plain, text/plain;format=flowed, */*\r\n",
-        );
-        let mut r = new_request_units(&s);
-        println!("Accept: {:?}", r.header_value_string("Accept", &s));
-        s.extend_from_slice("Host:www\r\n\r\n ".as_bytes());
-        if r.is_finish() {
-            r = new_request_units(&s);
-        }
-        println!("Host: {:?}", r.header_value_string("Host", &s));
-
-        let mut r = pack_request("GET", "/");
-        r.set_header(
-            String::from("Accept"),
+        let mut r = H1Request::with_method_target("GET", "/");
+        r.headers_mut().add_field(
+            "Accept".to_string(),
             Vec::from("text/*, text/plain, text/plain;format=flowed, */*"),
         );
-        let s = r.pack();
-        let mut r = to_request(s);
-        println!("Accept: {:?}", r.header_value_string("Accept"));
-        assert_eq!(r.method(), "GET");
+        r.headers_mut()
+            .add_field("Host".to_string(), Vec::from("www "));
+
+        let mut s = Vec::new();
+        r.export(&mut s);
+
+        let mut u = H1RequestUnits::new(&s);
+        println!("Accept: {:?}", u.header_value_string("Accept"));
+        s.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaa");
+        u.set_slice(&s);
+        println!("Host: {:?}", u.header_value_string("Host"));
+
+        let d = H1RequestDecoder::new(s);
+        let rst = d.to_request();
+        println!("{:?}", rst);
+        assert_eq!("GET", rst.method());
     }
 
     #[test]
     fn test_response() {
-        let s = Vec::from(
-            "HTTP1.1 200 \r\nAccept: text/*, text/plain, text/plain;format=flowed, */*\r\n\r\n",
-        );
-        let mut r = new_response_units(&s);
-        println!("Accept: {:?}", r.header_value_string("Accept", &s));
-
-        let mut r = pack_response("200");
-        r.set_header(
-            String::from("Accept"),
+        let mut r = H1Response::with_status_code("200");
+        r.headers_mut().add_field(
+            "Accept".to_string(),
             Vec::from("text/*, text/plain, text/plain;format=flowed, */*"),
         );
-        let s = r.pack();
-        let mut r = to_response(s);
-        println!("Accept: {:?}", r.header_value_string("Accept"));
-        assert_eq!(r.status_code(), "200");
+
+        let mut s = Vec::new();
+        r.export(&mut s);
+
+        let mut u = H1ResponseUnits::new(&s);
+        println!("Accept: {:?}", u.header_value_string("Accept"));
+
+        let d = H1ResponseDecoder::new(s);
+        let rst = d.to_response();
+        println!("{:?}", rst);
+        assert_eq!("200", rst.status_code());
     }
 }
