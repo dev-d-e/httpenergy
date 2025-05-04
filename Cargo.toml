@@ -5,6 +5,6 @@ edition = "2021"
 
 
 [dependencies]
-bytes = "*"
+getset = "*"
 time = { version = "*", features = ["macros", "formatting", "parsing", "local-offset", "serde"] }
 utf8parse = "*"
