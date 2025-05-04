@@ -29,6 +29,31 @@ pub trait Indices {
 
     ///Returns some indexes corresponding to the name.
     fn find_name(&self, name: &[u8]) -> Vec<usize>;
+
+    ///Returns result of finding an index.
+    fn find_an_index(&self, name: &[u8], value: &[u8]) -> IndexResult {
+        let r = self.find_name_value(name, value);
+        if r.is_empty() {
+            let r = self.find_name(name);
+            if r.is_empty() {
+                IndexResult::None
+            } else {
+                IndexResult::One(r[0])
+            }
+        } else {
+            IndexResult::Both(r[0])
+        }
+    }
+}
+
+///Represents the result of finding an index.
+pub enum IndexResult {
+    ///Identifies an entry(name-value pair) in either the static table or the dynamic table.
+    Both(usize),
+    ///Identifies a name in either the static table or the dynamic table.
+    One(usize),
+    ///No index.
+    None,
 }
 
 ///Indexing Tables
