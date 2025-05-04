@@ -3,12 +3,18 @@
 A library for parsing HTTP request and response.
 
  ```
-use httpenergy::{to_request, Request};
-use httpenergy::{to_response, Response};
+use httpenergy::{H1Request, H1RequestUnits, H1RequestDecoder};
 
-let request = to_request();
-request.method();
+let request = H1Request::with_method_target("GET", "/");
+let mut s = Vec::new();
+request.export(&mut s);
 
-let response = to_response();
-response.status_code();
+let units=H1RequestUnits::new(&s);
+let mut r =H1Request::new();
+units.copy_to_request(&mut r);
+println!("H1RequestUnits: {:?}", r.method());
+
+let decoder = H1RequestDecoder::new(s);
+let r2 =decoder.to_request();
+println!("H1RequestDecoder: {:?}", r2.method());
 ```
