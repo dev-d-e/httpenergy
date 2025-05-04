@@ -1,386 +1,310 @@
 use crate::common::*;
-use std::collections::HashMap;
+use crate::{Entity, WriteByte};
+use getset::{Getters, MutGetters, Setters};
+use std::ops::{Deref, DerefMut};
 
-///Parse bytes to `RequestUnits`.
-pub fn new_request_units(bytes: &Vec<u8>) -> RequestUnits {
-    let mut units = RequestUnits::new();
-    units.build(bytes);
-    units
+///Represents an HTTP/1.1 request.
+#[derive(Getters, Setters)]
+pub struct H1Request {
+    #[getset(get = "pub", set = "pub")]
+    method: String,
+    #[getset(get = "pub", set = "pub")]
+    target: String,
+    #[getset(get = "pub", set = "pub")]
+    version: String,
+    headers_body: Entity,
 }
 
-///Parse bytes to `Request`.
-pub fn to_request(bytes: Vec<u8>) -> Request {
-    let mut request = Request::new(bytes);
-    request.build();
-    request
+impl Deref for H1Request {
+    type Target = Entity;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.headers_body
+    }
 }
 
-///Parse bytes to `Request`.
-pub fn string_to_request(str: String) -> Request {
-    to_request(str.into_bytes())
+impl DerefMut for H1Request {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.headers_body
+    }
 }
 
-///Pack sth into `Request`.
-pub fn pack_request(method: &str, target: &str) -> Request {
-    let mut request = Request::new_pack();
-    request.set_method(method);
-    request.set_target(target);
-    request.set_version(VERSION);
-    request
+impl std::fmt::Debug for H1Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H1Request")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("version", &self.version)
+            .field("headers", self.headers_body.headers())
+            .field("body len", &self.headers_body.body().len())
+            .field("err", &self.headers_body.err())
+            .finish()
+    }
+}
+
+impl H1Request {
+    ///Creates.
+    pub fn new() -> Self {
+        Self {
+            method: String::new(),
+            target: String::new(),
+            version: VERSION.to_string(),
+            headers_body: Entity::new(),
+        }
+    }
+
+    ///Creates with method and target.
+    pub fn with_method_target(method: &str, target: &str) -> Self {
+        Self {
+            method: method.to_string(),
+            target: target.to_string(),
+            version: VERSION.to_string(),
+            headers_body: Entity::new(),
+        }
+    }
+
+    ///Exports an HTTP/1.1 message.
+    pub fn export(&self, writer: &mut impl WriteByte) {
+        writer.put_all(self.method.as_bytes());
+        writer.put(SPACE);
+        writer.put_all(self.target.as_bytes());
+        writer.put(SPACE);
+        writer.put_all(self.version.as_bytes());
+        writer.put(CR);
+        writer.put(LF);
+        self.headers_body.export(writer);
+    }
 }
 
 macro_rules! units_header_body {
     () => {
-        fn build(&mut self, buf: &[u8]) {
-            let mut context = match self.build_context.take() {
-                Some(context) => context,
-                None => return,
-            };
-
-            accept_context(&mut context, buf);
-
-            self.from_context(&mut context, buf);
-
-            context.search_header_name = None;
-            if context.suspend {
-                context.suspend = false;
-                if !context.finish {
-                    self.build_context.replace(context);
-                }
+        pub fn set_slice(&mut self, s: &[u8]) {
+            self.ptr = s.as_ptr();
+            let n = s.len();
+            if n > self.len {
+                self.len = n;
             }
         }
 
-        fn header_value_index(&mut self, name: &str, buf: &[u8]) -> Option<(usize, usize)> {
-            if !self.headers.contains_key(name) {
-                if let Some(context) = &mut self.build_context {
-                    context.search_header_name = Some(name.to_string());
-                    self.build(buf);
-                }
+        fn build(&mut self) {
+            if self.is_finish() {
+                return;
             }
-            self.headers.get(name).copied()
+            let buf = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+            accept_context(&mut self.build_context, buf);
+        }
+
+        fn header_value_index(&mut self, name: &[u8]) -> Option<(usize, usize)> {
+            self.build_context.find_header(name).or_else(|| {
+                self.build_context.set_search(name.into());
+                self.build();
+                self.build_context.find_header(name)
+            })
         }
 
         ///Returns a reference to header value.
-        pub fn header_value<'a>(&mut self, name: &str, buf: &'a [u8]) -> Option<&'a [u8]> {
-            let (index0, index1) = self.header_value_index(name, buf)?;
-            return Some(&buf[index0..index1]);
+        pub fn header_value(&mut self, name: &str) -> Option<&[u8]> {
+            self.header_value_index(name.as_bytes())
+                .map(|r| {
+                    let buf = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+                    let r = trim_whitespace(buf, r.0, r.1);
+                    buf.get(r.0..r.1)
+                })
+                .flatten()
         }
 
         ///Returns a header value `Vec`.
-        pub fn header_value_vec(&mut self, name: &str, buf: &[u8]) -> Vec<u8> {
-            match self.header_value(name, buf) {
-                Some(value) => Vec::from(value),
-                None => Vec::new(),
-            }
-        }
-
-        ///Returns a header value `String`.
-        pub fn header_value_string(&mut self, name: &str, buf: &[u8]) -> String {
-            match self.header_value(name, buf) {
-                Some(value) => into_str(value),
-                None => String::new(),
-            }
-        }
-
-        ///Returns a index to body.
-        pub fn body(&mut self, buf: &[u8]) -> usize {
-            if self.body == 0 {
-                self.build(buf);
-            }
-            self.body
-        }
-
-        ///Returns true if the building is finished.
-        pub fn is_finish(&self) -> bool {
-            self.build_context.is_none()
-        }
-
-        ///Returns true if format is wrong.
-        pub fn is_err(&self) -> bool {
-            self.err
-        }
-    };
-}
-
-///Represents units of an HTTP request.
-#[derive(Debug)]
-pub struct RequestUnits {
-    method: String,
-    target: String,
-    version: String,
-    headers: HashMap<String, (usize, usize)>,
-    body: usize,
-    err: bool,
-    build_context: Option<BuildContext>,
-}
-
-impl RequestUnits {
-    fn new() -> Self {
-        RequestUnits {
-            method: String::new(),
-            target: String::new(),
-            version: String::new(),
-            headers: HashMap::new(),
-            body: 0,
-            err: false,
-            build_context: Some(BuildContext::new()),
-        }
-    }
-
-    fn from_context(&mut self, context: &mut BuildContext, buf: &[u8]) {
-        if self.method.is_empty() {
-            self.method = to_str(context.method_vec.drain(..));
-        }
-        if self.target.is_empty() {
-            self.target = to_str(context.target_vec.drain(..));
-        }
-        if self.version.is_empty() {
-            self.version = to_str(context.version_vec.drain(..));
-        }
-
-        //The header value does not include leading or trailing whitespace.
-        let headers = &mut context.headers;
-        for h in headers.drain(..) {
-            let v = trim_whitespace(buf, h.1, h.2);
-            self.headers.insert(h.0, v);
-        }
-
-        self.body = context.body;
-        self.err = context.err;
-    }
-
-    ///Returns a slice to method value.
-    pub fn method(&mut self) -> &str {
-        &self.method
-    }
-
-    ///Returns a slice to target value.
-    pub fn target(&mut self) -> &str {
-        &self.target
-    }
-
-    ///Returns a slice to version value.
-    pub fn version(&mut self) -> &str {
-        &self.version
-    }
-
-    units_header_body!();
-}
-
-macro_rules! header_body {
-    () => {
-        fn build(&mut self) {
-            let mut context = match self.build_context.take() {
-                Some(context) => context,
-                None => return,
-            };
-
-            let buf = &self.bytes;
-            accept_context(&mut context, buf);
-
-            self.from_context(&mut context);
-
-            context.search_header_name = None;
-            if context.suspend {
-                context.suspend = false;
-                if !context.finish {
-                    self.build_context.replace(context);
-                }
-            }
-        }
-
-        ///Set header field. If the headers did have this header name present, the value is updated.
-        pub fn set_header(&mut self, name: String, value: Vec<u8>) {
-            self.headers.insert(name, value);
-        }
-
-        ///Returns a reference to header value.
-        pub fn header_value(&mut self, name: &str) -> Option<&Vec<u8>> {
-            if !self.headers.contains_key(name) {
-                if let Some(context) = &mut self.build_context {
-                    context.search_header_name = Some(name.to_string());
-                    self.build();
-                }
-            }
-            self.headers.get(name)
+        pub fn header_value_vec(&mut self, name: &str) -> Vec<u8> {
+            self.header_value(name)
+                .map(|r| r.to_vec())
+                .unwrap_or(Vec::new())
         }
 
         ///Returns a header value `String`.
         pub fn header_value_string(&mut self, name: &str) -> String {
-            match self.header_value(name) {
-                Some(value) => into_str(value),
-                None => String::new(),
-            }
+            self.header_value(name)
+                .map(|r| into_str(r))
+                .unwrap_or(String::new())
         }
 
-        ///Set body.
-        pub fn set_body(&mut self, body: Vec<u8>) {
-            self.body = body;
+        ///Returns a index to body.
+        pub fn position(&mut self) -> usize {
+            if self.build_context.body == 0 {
+                self.build();
+            }
+            self.build_context.body
         }
 
         ///Returns a reference to body.
-        pub fn body(&mut self) -> &Vec<u8> {
-            if self.body.is_empty() {
-                self.build();
-            }
-            &self.body
+        pub fn body(&mut self) -> Option<&[u8]> {
+            let buf = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+            buf.get(self.position()..)
+        }
+
+        ///Returns true if the building is finished.
+        pub fn is_finish(&self) -> bool {
+            self.build_context.finish
         }
 
         ///Returns true if format is wrong.
         pub fn is_err(&self) -> bool {
-            self.err
-        }
-
-        ///Pack headers and body.
-        pub fn pack_headers_body(&mut self, vec: &mut Vec<u8>) {
-            for (k, v) in self.headers.iter() {
-                vec.extend_from_slice(k.as_bytes());
-                vec.push(COLON);
-                vec.extend_from_slice(v);
-                vec.push(CR);
-                vec.push(LF);
-            }
-            vec.push(CR);
-            vec.push(LF);
-            if self.body.len() > 0 {
-                vec.extend_from_slice(&self.body);
-            }
+            !self.build_context.err.is_empty()
         }
     };
 }
 
-///Represents an HTTP request. Hold request bytes.
-#[derive(Debug)]
-pub struct Request {
-    method: String,
-    target: String,
-    version: String,
-    headers: HashMap<String, Vec<u8>>,
-    body: Vec<u8>,
-    err: bool,
-    bytes: Vec<u8>,
-    build_context: Option<BuildContext>,
+///Represents units of an HTTP/1.1 request.
+pub struct H1RequestUnits {
+    ptr: *const u8,
+    len: usize,
+    build_context: BuildContext,
 }
 
-impl Request {
-    fn new(bytes: Vec<u8>) -> Self {
-        Request {
-            method: String::new(),
-            target: String::new(),
-            version: String::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-            err: false,
-            bytes,
-            build_context: Some(BuildContext::new()),
-        }
+impl H1RequestUnits {
+    ///Creates with bytes.
+    pub fn new(s: &[u8]) -> Self {
+        let mut o = Self {
+            ptr: s.as_ptr(),
+            len: s.len(),
+            build_context: BuildContext::new(),
+        };
+        o.build();
+        o
     }
 
-    fn new_pack() -> Self {
-        Request {
-            method: String::new(),
-            target: String::new(),
-            version: String::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-            err: false,
-            bytes: Vec::new(),
-            build_context: None,
-        }
-    }
-
-    fn from_context(&mut self, context: &mut BuildContext) {
-        if self.method.is_empty() {
-            self.method = to_str(context.method_vec.drain(..));
-        }
-        if self.target.is_empty() {
-            self.target = to_str(context.target_vec.drain(..));
-        }
-        if self.version.is_empty() {
-            self.version = to_str(context.version_vec.drain(..));
-        }
-
-        //The header value does not include leading or trailing whitespace.
-        let headers = &mut context.headers;
-        let mut n = 0;
-        for h in headers.iter_mut() {
-            if n < h.2 {
-                n = h.2;
-            }
-            (h.1, h.2) = trim_whitespace(&self.bytes, h.1, h.2);
-        }
-
-        if n > 0 {
-            let mut vec: Vec<u8> = self.bytes.drain(..n).collect();
-            while let Some(h) = headers.pop() {
-                let v = vec.split_off(h.2);
-                drop(v);
-                let v = vec.split_off(h.1);
-                self.headers.insert(h.0, v);
-            }
-            drop(vec);
-        }
-
-        if context.body > 0 && context.body >= n {
-            n = context.body - n;
-            self.body = self.bytes.split_off(n);
-            self.bytes.clear();
-        }
-
-        self.err = context.err;
-    }
-
-    ///Set method value.
-    pub fn set_method(&mut self, method: &str) {
-        self.method.clear();
-        self.method.push_str(method);
-    }
+    units_header_body!();
 
     ///Returns a slice to method value.
-    pub fn method(&mut self) -> &str {
-        &self.method
-    }
-
-    ///Set target value.
-    pub fn set_target(&mut self, target: &str) {
-        self.target.clear();
-        self.target.push_str(target);
+    pub fn method(&self) -> &[u8] {
+        &self.build_context.method_vec
     }
 
     ///Returns a slice to target value.
-    pub fn target(&mut self) -> &str {
-        &self.target
-    }
-
-    ///Set version value.
-    pub fn set_version(&mut self, version: &str) {
-        self.version.clear();
-        self.version.push_str(version);
+    pub fn target(&self) -> &[u8] {
+        &self.build_context.target_vec
     }
 
     ///Returns a slice to version value.
-    pub fn version(&mut self) -> &str {
-        &self.version
+    pub fn version(&self) -> &[u8] {
+        &self.build_context.version_vec
     }
 
-    ///Pack bytes.
-    pub fn pack(&mut self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.extend_from_slice(self.method.as_bytes());
-        vec.push(SPACE);
-        vec.extend_from_slice(self.target.as_bytes());
-        vec.push(SPACE);
-        vec.extend_from_slice(self.version.as_bytes());
-        vec.push(CR);
-        vec.push(LF);
-        self.pack_headers_body(&mut vec);
-        vec
-    }
+    ///Copies bytes from self to request.
+    pub fn copy_to_request(mut self, request: &mut H1Request) {
+        if !self.is_finish() {
+            self.build();
+        }
 
-    header_body!();
+        if request.method.is_empty() {
+            request.set_method(into_str(self.method()));
+        }
+        if request.target.is_empty() {
+            request.set_target(into_str(self.target()));
+        }
+        if request.version.is_empty() {
+            request.set_version(into_str(self.version()));
+        }
+
+        let buf = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+
+        let m = request.headers_body.headers_mut();
+        //The header value does not include leading or trailing whitespace.
+        for (a, b, c) in self.build_context.headers.drain(..) {
+            let (b, c) = trim_whitespace(buf, b, c);
+            if let Some(s) = buf.get(b..c) {
+                m.add_field(to_str(a.into_iter()), s.to_vec());
+            }
+        }
+
+        if let Some(body) = self.body() {
+            request.headers_body.body_mut().extend_from_slice(body);
+        }
+
+        request.headers_body.set_err(self.is_err());
+    }
 }
 
-#[derive(Debug)]
+///Represents a request decoder. Hold request bytes.
+#[derive(Getters, MutGetters)]
+pub struct H1RequestDecoder {
+    buffer: Vec<u8>,
+    #[getset(get = "pub", get_mut = "pub")]
+    units: H1RequestUnits,
+    #[getset(get = "pub")]
+    request: H1Request,
+}
+
+impl H1RequestDecoder {
+    ///Creates with bytes.
+    pub fn new(buffer: Vec<u8>) -> Self {
+        let units = H1RequestUnits::new(&buffer);
+        let mut o = Self {
+            buffer,
+            units,
+            request: H1Request::new(),
+        };
+        o.units.set_slice(&o.buffer);
+        o
+    }
+
+    ///Splits bytes from self to request.
+    pub fn to_request(mut self) -> H1Request {
+        if !self.units.is_finish() {
+            self.units.build();
+        }
+
+        if self.request.method.is_empty() {
+            self.request.set_method(into_str(self.units.method()));
+        }
+        if self.request.target.is_empty() {
+            self.request.set_target(into_str(self.units.target()));
+        }
+        if self.request.version.is_empty() {
+            self.request.set_version(into_str(self.units.version()));
+        }
+
+        //The header value does not include leading or trailing whitespace.
+        let headers = &mut self.units.build_context.headers;
+        let mut n = 0;
+        headers.iter().for_each(|h| {
+            if n < h.2 {
+                n = h.2;
+            }
+        });
+
+        let body = self.units.position();
+        if body > 0 && body >= n {
+            *self.request.headers_body.body_mut() = self.buffer.split_off(body);
+        }
+
+        self.buffer.truncate(n);
+
+        let headers = &mut self.units.build_context.headers;
+        let m = self.request.headers_body.headers_mut();
+        while let Some((a, b, c)) = headers.pop() {
+            let (b, c) = trim_whitespace(&self.buffer, b, c);
+            self.buffer.truncate(c);
+            let v = self.buffer.split_off(b);
+            m.add_field(to_str(a.into_iter()), v);
+        }
+
+        self.request.headers_body.set_err(self.units.is_err());
+
+        self.request
+    }
+
+    ///Copies bytes from self to request.
+    pub fn copy_to_request(mut self) -> (H1Request, Vec<u8>) {
+        if !self.units.is_finish() {
+            self.units.build();
+        }
+        self.units.copy_to_request(&mut self.request);
+        (self.request, self.buffer)
+    }
+}
+
 struct BuildContext {
     current_function: fn(&mut BuildContext),
     post_separator_function: fn(&mut BuildContext),
@@ -391,17 +315,17 @@ struct BuildContext {
     version_vec: Vec<u8>,
     header_name: Vec<u8>,
     header_value_index: usize,
-    headers: Vec<(String, usize, usize)>,
+    headers: Vec<(Vec<u8>, usize, usize)>,
     body: usize,
-    search_header_name: Option<String>,
+    search_header_name: Option<Vec<u8>>,
     suspend: bool,
     finish: bool,
-    err: bool,
+    err: Vec<usize>,
 }
 
 impl BuildContext {
     fn new() -> Self {
-        BuildContext {
+        Self {
             current_function: method_first,
             post_separator_function: method_first,
             b: 0,
@@ -416,8 +340,23 @@ impl BuildContext {
             search_header_name: None,
             suspend: false,
             finish: false,
-            err: false,
+            err: Vec::new(),
         }
+    }
+
+    fn set_search(&mut self, name: Vec<u8>) {
+        self.search_header_name.replace(name);
+    }
+
+    fn reset(&mut self) {
+        self.search_header_name.take();
+        if self.suspend {
+            self.suspend = false;
+        }
+    }
+
+    fn find_header(&mut self, k: &[u8]) -> Option<(usize, usize)> {
+        self.headers.iter().find(|a| a.0 == k).map(|r| (r.1, r.2))
     }
 }
 
@@ -432,6 +371,7 @@ macro_rules! parse_context {
                     break;
                 }
             }
+            context.reset();
         }
 
         fn accept(context: &mut $context, b: u8) {
@@ -449,7 +389,7 @@ macro_rules! space_cr_lf {
             if b == SPACE {
                 context.current_function = context.post_separator_function;
             } else {
-                context.err = true;
+                context.err.push(context.n);
             }
         }
 
@@ -458,7 +398,7 @@ macro_rules! space_cr_lf {
             if b == CR {
                 context.current_function = lf;
             } else {
-                context.err = true;
+                context.err.push(context.n);
             }
         }
 
@@ -467,10 +407,10 @@ macro_rules! space_cr_lf {
             if b == LF {
                 context.current_function = context.post_separator_function;
             } else if b == CR {
-                context.err = true;
+                context.err.push(context.n);
             } else {
                 context.current_function = cr;
-                context.err = true;
+                context.err.push(context.n);
             }
         }
     };
@@ -488,7 +428,7 @@ macro_rules! parse_headers_body {
                 context.current_function = cr;
                 cr(context);
             } else {
-                context.err = true;
+                context.err.push(context.n);
             }
         }
 
@@ -508,7 +448,7 @@ macro_rules! parse_headers_body {
             if b == COLON {
                 context.current_function = context.post_separator_function;
             } else {
-                context.err = true;
+                context.err.push(context.n);
             }
         }
 
@@ -524,7 +464,7 @@ macro_rules! parse_headers_body {
         fn header_value_tail(context: &mut $context) {
             let b = context.b;
             if is_crlf(b) {
-                let name = to_str(context.header_name.drain(..));
+                let name = std::mem::take(&mut context.header_name);
                 if let Some(s) = &context.search_header_name {
                     if s == &name {
                         context.suspend = true;
@@ -556,7 +496,7 @@ fn method_first(context: &mut BuildContext) {
         context.method_vec.push(b);
         context.current_function = method_tail;
     } else {
-        context.err = true;
+        context.err.push(context.n);
     }
 }
 
@@ -579,7 +519,7 @@ fn target_first(context: &mut BuildContext) {
         context.target_vec.push(b);
         context.current_function = target_tail;
     } else {
-        context.err = true;
+        context.err.push(context.n);
     }
 }
 
@@ -600,13 +540,13 @@ fn version_first(context: &mut BuildContext) {
         context.version_vec.push(b);
         context.current_function = version_tail;
     } else {
-        context.err = true;
+        context.err.push(context.n);
     }
 }
 
 fn version_tail(context: &mut BuildContext) {
     let b = context.b;
-    if b.is_ascii_alphanumeric() || b == DOT {
+    if b.is_ascii_alphanumeric() || b == DOT || b == SLASH {
         context.version_vec.push(b);
     } else {
         context.post_separator_function = header_name_first;
