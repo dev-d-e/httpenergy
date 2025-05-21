@@ -1,65 +1,62 @@
+/*!
+Utilities for field section compression and decompression.
+
+# Compression
+Field section compression is the process of compressing a set of field lines to form a field block.
+
+The [`EncodeInstructions`] type can be used to encode different field representations to a sequence of octets.
+
+The [`FieldRep`] enum help to represent different field representations, you can use [`FieldRep::encode`] directly.
+
+# Decompression
+Field section decompression is the process of decoding a field block into a set of field lines.
+
+To parse a field block, you need an implementation of [`DecodeInstructions`], then you can use [`decode`] to decode a byte slice.
+
+# Index
+This module provides the [`Indices`] trait for working with indexing tables.
+*/
+
 mod index;
 
 use super::prty::*;
 use crate::{ReadByte, WriteByte};
 pub use index::*;
 
-///Represents header field.
-pub enum FieldRepresentation<'a> {
+///Represents field. A header field can be represented in encoded form either as a literal or as an index.
+pub enum FieldRep<'a> {
     Indexed(usize),
-    IndexedNameValue(FieldIndexType, usize, &'a [u8]),
-    NewNameValue(FieldIndexType, &'a [u8], &'a [u8]),
+    IncrementalIndexingIndexedName(usize, &'a [u8]),
+    IncrementalIndexingNewName(&'a [u8], &'a [u8]),
+    WithoutIndexingIndexedName(usize, &'a [u8]),
+    WithoutIndexingNewName(&'a [u8], &'a [u8]),
+    NeverIndexedIndexedName(usize, &'a [u8]),
+    NeverIndexedNewName(&'a [u8], &'a [u8]),
 }
 
-impl<'a> FieldRepresentation<'a> {
+impl<'a> FieldRep<'a> {
+    #[inline]
     pub fn encode(self, writer: &mut impl WriteByte) {
         match self {
             Self::Indexed(n) => {
                 EncodeInstructions::indexed(n, writer);
             }
-            Self::IndexedNameValue(t, n, value) => {
-                t.indexed_name(n, value, writer);
-            }
-            Self::NewNameValue(t, name, value) => {
-                t.new_name(name, value, writer);
-            }
-        }
-    }
-}
-
-///Represents index type of header field.
-pub enum FieldIndexType {
-    IncrementalIndexing,
-    WithoutIndexing,
-    NeverIndexed,
-}
-
-impl FieldIndexType {
-    ///Indexed Name
-    pub fn indexed_name(self, n: usize, value: &[u8], writer: &mut impl WriteByte) {
-        match self {
-            Self::IncrementalIndexing => {
+            Self::IncrementalIndexingIndexedName(n, value) => {
                 EncodeInstructions::incremental_indexing_indexed_name(n, value, writer);
             }
-            Self::WithoutIndexing => {
-                EncodeInstructions::without_indexing_indexed_name(n, value, writer);
-            }
-            Self::NeverIndexed => {
-                EncodeInstructions::never_indexed_indexed_name(n, value, writer);
-            }
-        }
-    }
-
-    ///New Name
-    pub fn new_name(self, name: &[u8], value: &[u8], writer: &mut impl WriteByte) {
-        match self {
-            Self::IncrementalIndexing => {
+            Self::IncrementalIndexingNewName(name, value) => {
                 EncodeInstructions::incremental_indexing_new_name(name, value, writer);
             }
-            Self::WithoutIndexing => {
+            Self::WithoutIndexingIndexedName(n, value) => {
+                EncodeInstructions::without_indexing_indexed_name(n, value, writer);
+            }
+            Self::WithoutIndexingNewName(name, value) => {
                 EncodeInstructions::without_indexing_new_name(name, value, writer);
             }
-            Self::NeverIndexed => {
+            Self::NeverIndexedIndexedName(n, value) => {
+                EncodeInstructions::never_indexed_indexed_name(n, value, writer);
+            }
+            Self::NeverIndexedNewName(name, value) => {
                 EncodeInstructions::never_indexed_new_name(name, value, writer);
             }
         }
@@ -73,17 +70,20 @@ pub struct EncodeInstructions;
 impl EncodeInstructions {
     ///Indexed Header Field Representation.
     ///An indexed header field representation identifies an entry in either the static table or the dynamic table.
+    #[inline]
     pub fn indexed(n: usize, writer: &mut impl WriteByte) {
         encode_integer(n, 7, 0x80, writer);
     }
 
     ///Literal Header Field with Incremental Indexing -- Indexed Name
+    #[inline]
     pub fn incremental_indexing_indexed_name(n: usize, value: &[u8], writer: &mut impl WriteByte) {
         encode_integer(n, 6, 0x40, writer);
         encode_literal_huffman_encoded(value, writer);
     }
 
     ///Literal Header Field with Incremental Indexing -- New Name
+    #[inline]
     pub fn incremental_indexing_new_name(name: &[u8], value: &[u8], writer: &mut impl WriteByte) {
         writer.put(0x40);
         encode_literal_huffman_encoded(name, writer);
@@ -91,12 +91,14 @@ impl EncodeInstructions {
     }
 
     ///Literal Header Field without Indexing -- Indexed Name
+    #[inline]
     pub fn without_indexing_indexed_name(n: usize, value: &[u8], writer: &mut impl WriteByte) {
         encode_integer(n, 4, 0x00, writer);
         encode_literal_huffman_encoded(value, writer);
     }
 
     ///Literal Header Field without Indexing -- New Name
+    #[inline]
     pub fn without_indexing_new_name(name: &[u8], value: &[u8], writer: &mut impl WriteByte) {
         writer.put(0x00);
         encode_literal_huffman_encoded(name, writer);
@@ -104,12 +106,14 @@ impl EncodeInstructions {
     }
 
     ///Literal Header Field Never Indexed -- Indexed Name
+    #[inline]
     pub fn never_indexed_indexed_name(n: usize, value: &[u8], writer: &mut impl WriteByte) {
         encode_integer(n, 4, 0x10, writer);
         encode_literal_huffman_encoded(value, writer);
     }
 
     ///Literal Header Field Never Indexed -- New Name
+    #[inline]
     pub fn never_indexed_new_name(name: &[u8], value: &[u8], writer: &mut impl WriteByte) {
         writer.put(0x10);
         encode_literal_huffman_encoded(name, writer);
@@ -117,6 +121,7 @@ impl EncodeInstructions {
     }
 
     ///Maximum Dynamic Table Size Change
+    #[inline]
     pub fn dynamic_table_size_update(n: usize, writer: &mut impl WriteByte) {
         encode_integer(n, 5, 0x20, writer);
     }
@@ -159,6 +164,7 @@ pub fn decode(mut buffer: &[u8], ins: &mut impl DecodeInstructions) {
     }
 }
 
+#[inline]
 fn decode_u8(i: u8, reader: &mut impl ReadByte, ins: &mut impl DecodeInstructions) {
     match i {
         129..255 => {
