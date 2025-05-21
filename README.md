@@ -1,20 +1,5 @@
 # httpenergy
 
-A library for parsing HTTP request and response.
+Httpenergy is a crate for working with request and response format in HTTP/1.1, HTTP/2 and HTTP/3 protocols.
 
- ```
-use httpenergy::{H1Request, H1RequestUnits, H1RequestDecoder};
-
-let request = H1Request::with_method_target("GET", "/");
-let mut s = Vec::new();
-request.export(&mut s);
-
-let units=H1RequestUnits::new(&s);
-let mut r =H1Request::new();
-units.copy_to_request(&mut r);
-println!("H1RequestUnits: {:?}", r.method());
-
-let decoder = H1RequestDecoder::new(s);
-let r2 =decoder.to_request();
-println!("H1RequestDecoder: {:?}", r2.method());
-```
+This crate does not provide anything about connection.
