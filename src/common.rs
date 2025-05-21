@@ -82,3 +82,7 @@ pub(crate) fn into_str(buf: &[u8]) -> String {
     }
     s.0
 }
+
+pub(crate) fn vec_to_str(v: Vec<u8>) -> String {
+    to_str(v.into_iter())
+}
