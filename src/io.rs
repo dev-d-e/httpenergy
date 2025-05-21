@@ -123,6 +123,9 @@ pub trait WriteByte {
     ///Writes an unsigned 8 bit integer to self.
     fn put(&mut self, o: u8) -> Option<Error>;
 
+    ///Writes repetitive cnt bytes an unsigned 8 bit integer to self.
+    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error>;
+
     ///Writes a buffer to self.
     ///self must have enough surplus to contain all bytes.
     fn put_all(&mut self, buf: &[u8]) -> Option<Error>;
@@ -180,6 +183,11 @@ impl WriteByte for Vec<u8> {
         None
     }
 
+    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error> {
+        self.resize(self.len() + cnt, o);
+        None
+    }
+
     #[inline]
     fn put_some(&mut self, buf: &[u8]) -> Result<Option<&[u8]>, Error> {
         self.extend_from_slice(buf);
@@ -221,7 +229,7 @@ where
         Self::new(inner, 4096)
     }
 
-    #[inline(always)]
+    #[inline]
     fn put_check(&mut self) -> Option<Error> {
         if self.buf.len() >= self.buf_size {
             self.inner.put_all(&self.buf)?;
@@ -247,6 +255,18 @@ where
     }
 
     #[inline]
+    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error> {
+        self.put_check()?;
+        if self.buf.len() + cnt >= self.buf_size {
+            self.inner.put_all(&self.buf)?;
+            self.buf.clear();
+            self.inner.put_repeat(cnt, o)
+        } else {
+            self.buf.put_repeat(cnt, o)
+        }
+    }
+
+    #[inline]
     fn put_all(&mut self, o: &[u8]) -> Option<Error> {
         self.put_check()?;
         if self.buf.len() + o.len() >= self.buf_size {
@@ -257,12 +277,4 @@ where
             self.buf.put_all(o)
         }
     }
-}
-
-pub(crate) fn get_bytes(n: usize, buf: &mut impl ReadByte) -> Vec<u8> {
-    let mut vec = Vec::new();
-    if let Some(o) = buf.fetch_all(n) {
-        vec.put_all(o);
-    }
-    vec
 }
