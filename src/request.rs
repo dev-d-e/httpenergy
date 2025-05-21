@@ -214,7 +214,7 @@ impl H1RequestUnits {
         for (a, b, c) in self.build_context.headers.drain(..) {
             let (b, c) = trim_whitespace(buf, b, c);
             if let Some(s) = buf.get(b..c) {
-                m.add_field(to_str(a.into_iter()), s.to_vec());
+                m.add_field(vec_to_str(a), s.to_vec());
             }
         }
 
@@ -287,7 +287,7 @@ impl H1RequestDecoder {
             let (b, c) = trim_whitespace(&self.buffer, b, c);
             self.buffer.truncate(c);
             let v = self.buffer.split_off(b);
-            m.add_field(to_str(a.into_iter()), v);
+            m.add_field(vec_to_str(a), v);
         }
 
         self.request.headers_body.set_err(self.units.is_err());
