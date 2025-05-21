@@ -1,8 +1,8 @@
 use super::huffman::*;
-use crate::io::get_bytes;
 use crate::{ReadByte, WriteByte};
 
 ///Represent an integer 'i' on 'w' bits, with prefix 'p'.
+#[inline]
 pub(crate) fn encode_integer(mut i: usize, w: u8, p: u8, writer: &mut impl WriteByte) {
     if w < 1 || w >= 8 {
         return;
@@ -21,7 +21,7 @@ pub(crate) fn encode_integer(mut i: usize, w: u8, p: u8, writer: &mut impl Write
     }
 }
 
-///Decode an integer representation.
+#[inline]
 pub(crate) fn decode_integer(mut n: usize, reader: &mut impl ReadByte) -> usize {
     let mut m = 0;
     while let Some(i) = reader.fetch() {
@@ -34,7 +34,7 @@ pub(crate) fn decode_integer(mut n: usize, reader: &mut impl ReadByte) -> usize 
     n
 }
 
-///Represent string literal as octets of huffman encoded.
+#[inline]
 pub(crate) fn encode_literal_huffman_encoded(reader: &[u8], writer: &mut impl WriteByte) {
     let mut v = Vec::new();
     encode_huffman(reader, &mut v);
@@ -43,38 +43,46 @@ pub(crate) fn encode_literal_huffman_encoded(reader: &[u8], writer: &mut impl Wr
     writer.put_all(&v);
 }
 
-///Represent string literal as raw octets.
+#[inline]
 pub(crate) fn encode_literal(reader: &[u8], writer: &mut impl WriteByte) {
     let i = reader.len();
     encode_integer(i, 7, 0x00, writer);
     writer.put_all(reader);
 }
 
-///Decode string literal representation
+#[inline]
 pub(crate) fn decode_literal(reader: &mut impl ReadByte, writer: &mut impl WriteByte) {
     if let Some(i) = reader.fetch() {
         match i {
             128..255 => {
                 let r = (i & 0x7f) as usize;
-                decode_huffman(&get_bytes(r, reader), writer);
+                if let Some(o) = reader.fetch_all(r) {
+                    decode_huffman(o, writer);
+                }
             }
             255 => {
                 let r = decode_integer(127, reader);
-                decode_huffman(&get_bytes(r, reader), writer);
+                if let Some(o) = reader.fetch_all(r) {
+                    decode_huffman(o, writer);
+                }
             }
             0..127 => {
                 let r = i as usize;
-                writer.put_all(&get_bytes(r, reader));
+                if let Some(o) = reader.fetch_all(r) {
+                    writer.put_all(o);
+                }
             }
             127 => {
                 let r = decode_integer(127, reader);
-                writer.put_all(&get_bytes(r, reader));
+                if let Some(o) = reader.fetch_all(r) {
+                    writer.put_all(o);
+                }
             }
         }
     }
 }
 
-///Decode string literal representation to vec.
+#[inline]
 pub(crate) fn decode_literal_to_vec(reader: &mut impl ReadByte) -> Vec<u8> {
     let mut v = Vec::new();
     decode_literal(reader, &mut v);
