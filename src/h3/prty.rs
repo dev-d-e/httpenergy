@@ -1,3 +1,5 @@
+use crate::h2::huffman::encode_huffman;
+use crate::h2::prty::encode_integer;
 use crate::{ReadByte, WriteByte};
 
 const USABLE_BITS: u8 = 0b0011_1111;
@@ -85,6 +87,27 @@ pub(super) fn u64_2_to_var(a: u64, b: u64) -> Vec<u8> {
     encode_u64(a, &mut vec);
     encode_u64(b, &mut vec);
     vec
+}
+
+#[inline]
+pub(crate) fn encode_prefix_literal_huffman(
+    reader: &[u8],
+    w: u8,
+    p: u8,
+    writer: &mut impl WriteByte,
+) {
+    let mut v = Vec::new();
+    encode_huffman(reader, &mut v);
+    let i = v.len();
+    encode_integer(i, w, p, writer);
+    writer.put_all(&v);
+}
+
+#[inline]
+pub(crate) fn encode_prefix_literal(reader: &[u8], w: u8, p: u8, writer: &mut impl WriteByte) {
+    let i = reader.len();
+    encode_integer(i, w, p, writer);
+    writer.put_all(reader);
 }
 
 #[inline]
