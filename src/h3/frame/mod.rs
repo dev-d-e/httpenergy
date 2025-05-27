@@ -1,7 +1,19 @@
+/*!
+Utilities for the frame.
+
+This module provides several encoder and decoder types for working with frames.
+
+# encoder
+Each frame type can create a new encoder, then encode to a `WriteByte`.
+
+# decoder
+To parse a frame, you can use [`FrameDecoder`] to decode a byte slice, returns a specific frame type.
+*/
+
 use super::prty::*;
-use super::qpack::FieldLineRepresentations;
+use super::qpack::{DistributeFieldInstructions, FieldInstructions};
 use crate::h2::frame::FrameError;
-use crate::WriteByte;
+use crate::{ReadByte, WriteByte};
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::collections::HashSet;
 use std::io::Error;
@@ -396,10 +408,10 @@ impl<'a> HeadersDecoder<'a> {
 
     ///Decodes encoded field section.
     ///
-    ///You need an implementation of `FieldLineRepresentations`.
-    pub fn decode_fields(&self, ins: &mut impl FieldLineRepresentations) {
-        if let Some(o) = self.encoded_field_section() {
-            super::qpack::decode_field(o, ins)
+    ///You need an implementation of `DistributeFieldInstructions`.
+    pub fn decode_fields(&self, ins: &mut impl DistributeFieldInstructions) {
+        if let Some(mut o) = self.encoded_field_section() {
+            FieldInstructions::decode(&mut o, ins)
         }
     }
 }
@@ -496,6 +508,23 @@ impl<'a> SettingsDecoder<'a> {
     pub fn is_correct(&self) -> bool {
         self.err.is_empty()
     }
+
+    ///Decode setting.
+    pub fn decode_setting(&self) -> Vec<(u64, u64)> {
+        let mut v = Vec::new();
+        if let Some(mut o) = self.setting() {
+            while o.has_surplus() {
+                let a = decode_var(&mut o);
+                if o.has_surplus() {
+                    let b = decode_var(&mut o);
+                    v.push((a, b));
+                } else {
+                    break;
+                }
+            }
+        }
+        v
+    }
 }
 
 ///A builder which decodes sequential bytes into it.
@@ -552,10 +581,10 @@ impl<'a> PushPromiseDecoder<'a> {
 
     ///Decodes encoded field section.
     ///
-    ///You need an implementation of `FieldLineRepresentations`.
-    pub fn decode_fields(&self, ins: &mut impl FieldLineRepresentations) {
-        if let Some(o) = self.encoded_field_section() {
-            super::qpack::decode_field(o, ins)
+    ///You need an implementation of `DistributeFieldInstructions`.
+    pub fn decode_fields(&self, ins: &mut impl DistributeFieldInstructions) {
+        if let Some(mut o) = self.encoded_field_section() {
+            FieldInstructions::decode(&mut o, ins)
         }
     }
 }
