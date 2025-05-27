@@ -62,6 +62,7 @@ pub(crate) mod prty;
 use self::hpack::{FieldRep, IndexResult};
 use crate::common::*;
 use crate::Entity;
+use crate::OctetsRef;
 pub use assist::*;
 use getset::{Getters, MutGetters};
 use std::ops::{Deref, DerefMut};
@@ -239,7 +240,10 @@ impl H2Request {
     pub fn headers_rep(&self) -> Vec<FieldRep> {
         let mut vec = Vec::new();
         for (k, v) in self.headers().iter() {
-            vec.push(FieldRep::IncrementalIndexingNewName(k.as_bytes(), v.one()));
+            vec.push(FieldRep::IncrementalIndexingNewName(
+                OctetsRef::new(k.as_bytes()),
+                OctetsRef::new(v.one()),
+            ));
         }
         vec
     }
@@ -252,7 +256,7 @@ fn index_to_rep<'a>(r: IndexResult<'a>, vec: &mut Vec<FieldRep<'a>>) {
             vec.push(FieldRep::Indexed(i));
         }
         IndexResult::One(i, o) => {
-            vec.push(FieldRep::WithoutIndexingIndexedName(i, o));
+            vec.push(FieldRep::WithoutIndexingIndexedName(i, OctetsRef::new(o)));
         }
         IndexResult::None => {}
     }
@@ -351,7 +355,10 @@ impl H2Response {
     pub fn headers_rep(&self) -> Vec<FieldRep> {
         let mut vec = Vec::new();
         for (k, v) in self.headers().iter() {
-            vec.push(FieldRep::IncrementalIndexingNewName(k.as_bytes(), v.one()));
+            vec.push(FieldRep::IncrementalIndexingNewName(
+                OctetsRef::new(k.as_bytes()),
+                OctetsRef::new(v.one()),
+            ));
         }
         vec
     }
