@@ -1,4 +1,5 @@
-use crate::{common::*, WriteByte};
+use crate::common::*;
+use crate::WriteByte;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -167,5 +168,41 @@ impl Entity {
         if self.body.len() > 0 {
             writer.put_all(&self.body);
         }
+    }
+}
+
+///Represents bytes to string literal.
+///
+///A string literal is encoded as a sequence of octets, either by directly encoding the string literal’s octets or by using a Huffman code.
+pub struct OctetsRef<'a>(&'a [u8], bool);
+
+impl<'a> Deref for OctetsRef<'a> {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> OctetsRef<'a> {
+    ///Creates, and sets the bytes will be huffman encoded.
+    pub fn new(s: &'a [u8]) -> Self {
+        Self(s, true)
+    }
+
+    ///Creates with whether or not the bytes will be huffman encoded.
+    pub fn with(s: &'a [u8], o: bool) -> Self {
+        Self(s, o)
+    }
+
+    ///Whether or not the bytes will be huffman encoded.
+    pub fn huffman(&self) -> bool {
+        self.1
+    }
+
+    ///Sets whether or not the bytes will be huffman encoded.
+    pub fn set_huffman(&mut self, o: bool) {
+        self.1 = o;
     }
 }
