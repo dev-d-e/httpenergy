@@ -10,7 +10,7 @@ Each frame type can create a new encoder, then encode to a `WriteByte`.
 To parse a frame, you can use [`FrameDecoder`] to decode a byte slice, returns a specific frame type.
 */
 
-use super::hpack::DecodeInstructions;
+use super::hpack::{DistributeInstructions, Instructions};
 use crate::{ReadByte, WriteByte};
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::collections::HashSet;
@@ -1138,12 +1138,12 @@ impl<'a> HeadersDecoder<'a> {
 
     ///Decode field block fragment.
     ///
-    ///You need an implementation of `DecodeInstructions`.
+    ///You need an implementation of `DistributeInstructions`.
     ///
     ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DecodeInstructions) {
-        if let Some(o) = self.field_block_fragment() {
-            super::hpack::decode(o, ins)
+    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
+        if let Some(mut o) = self.field_block_fragment() {
+            Instructions::decode(&mut o, ins)
         }
     }
 }
@@ -1417,12 +1417,12 @@ impl<'a> PushPromiseDecoder<'a> {
 
     ///Decode field block fragment.
     ///
-    ///You need an implementation of `DecodeInstructions`.
+    ///You need an implementation of `DistributeInstructions`.
     ///
     ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DecodeInstructions) {
-        if let Some(o) = self.field_block_fragment() {
-            super::hpack::decode(o, ins)
+    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
+        if let Some(mut o) = self.field_block_fragment() {
+            Instructions::decode(&mut o, ins)
         }
     }
 }
@@ -1653,12 +1653,12 @@ impl<'a> ContinuationDecoder<'a> {
 
     ///Decode field block fragment.
     ///
-    ///You need an implementation of `DecodeInstructions`.
+    ///You need an implementation of `DistributeInstructions`.
     ///
     ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DecodeInstructions) {
-        if let Some(o) = self.field_block_fragment() {
-            super::hpack::decode(o, ins)
+    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
+        if let Some(mut o) = self.field_block_fragment() {
+            Instructions::decode(&mut o, ins)
         }
     }
 }
