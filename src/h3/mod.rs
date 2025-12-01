@@ -117,7 +117,7 @@ impl H3Request {
     }
 
     ///Returns a static table index value of ":method".
-    pub fn indexed_method(&self) -> IndexResult {
+    pub fn indexed_method(&self) -> IndexResult<'_> {
         match self.method.as_str() {
             "CONNECT" => IndexResult::Both(15),
             "DELETE" => IndexResult::Both(16),
@@ -131,7 +131,7 @@ impl H3Request {
     }
 
     ///Returns a static table index value of ":scheme" or None if scheme is None.
-    pub fn indexed_scheme(&self) -> IndexResult {
+    pub fn indexed_scheme(&self) -> IndexResult<'_> {
         if let Some(scheme) = &self.scheme {
             match scheme.as_str() {
                 "http" => IndexResult::Both(22),
@@ -144,7 +144,7 @@ impl H3Request {
     }
 
     ///Returns a static table index value of ":authority" or None if authority is None.
-    pub fn indexed_authority(&self) -> IndexResult {
+    pub fn indexed_authority(&self) -> IndexResult<'_> {
         if let Some(authority) = &self.authority {
             if authority.is_empty() {
                 IndexResult::Both(0)
@@ -157,7 +157,7 @@ impl H3Request {
     }
 
     ///Returns a static table index value of ":path" or None if path is None.
-    pub fn indexed_path(&self) -> IndexResult {
+    pub fn indexed_path(&self) -> IndexResult<'_> {
         if let Some(path) = &self.path {
             match path.as_str() {
                 "/" => IndexResult::Both(1),
@@ -224,7 +224,7 @@ impl H3Response {
     }
 
     ///Returns a static table index value of ":status".
-    pub fn indexed_status(&self) -> IndexResult {
+    pub fn indexed_status(&self) -> IndexResult<'_> {
         match self.status.as_str() {
             "103" => IndexResult::Both(24),
             "200" => IndexResult::Both(25),
