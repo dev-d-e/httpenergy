@@ -21,6 +21,10 @@ let decoder = H1RequestDecoder::new(s);
 let r2 =decoder.to_request();
 println!("H1RequestDecoder: {:?}", r2.method());
 ```
+
+[HTTP/2 example](h2/index.html)
+
+[HTTP/3 example](h3/index.html)
 */
 
 #![allow(dead_code)]
