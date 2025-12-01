@@ -175,7 +175,7 @@ impl H2Request {
     }
 
     ///Returns a static table index value of ":method".
-    pub fn indexed_method(&self) -> IndexResult {
+    pub fn indexed_method(&self) -> IndexResult<'_> {
         match self.method.as_str() {
             "GET" => IndexResult::Both(2),
             "POST" => IndexResult::Both(3),
@@ -184,7 +184,7 @@ impl H2Request {
     }
 
     ///Returns a static table index value of ":scheme" or None if scheme is None.
-    pub fn indexed_scheme(&self) -> IndexResult {
+    pub fn indexed_scheme(&self) -> IndexResult<'_> {
         if let Some(scheme) = &self.scheme {
             match scheme.as_str() {
                 "http" => IndexResult::Both(6),
@@ -197,7 +197,7 @@ impl H2Request {
     }
 
     ///Returns a static table index value of ":authority" or None if authority is None.
-    pub fn indexed_authority(&self) -> IndexResult {
+    pub fn indexed_authority(&self) -> IndexResult<'_> {
         if let Some(authority) = &self.authority {
             if authority.is_empty() {
                 IndexResult::Both(1)
@@ -210,7 +210,7 @@ impl H2Request {
     }
 
     ///Returns a static table index value of ":path" or None if path is None.
-    pub fn indexed_path(&self) -> IndexResult {
+    pub fn indexed_path(&self) -> IndexResult<'_> {
         if let Some(path) = &self.path {
             match path.as_str() {
                 "/" => IndexResult::Both(4),
@@ -225,7 +225,7 @@ impl H2Request {
     ///Converts fields to `FieldRep` vec.
     ///
     ///This function is used for test, maybe not meet your requirements.
-    pub fn pseudo_rep(&self) -> Vec<FieldRep> {
+    pub fn pseudo_rep(&self) -> Vec<FieldRep<'_>> {
         let mut vec = Vec::new();
         index_to_rep(self.indexed_method(), &mut vec);
         index_to_rep(self.indexed_scheme(), &mut vec);
@@ -237,7 +237,7 @@ impl H2Request {
     ///Converts fields to `FieldRep` vec.
     ///
     ///This function is used for test, maybe not meet your requirements.
-    pub fn headers_rep(&self) -> Vec<FieldRep> {
+    pub fn headers_rep(&self) -> Vec<FieldRep<'_>> {
         let mut vec = Vec::new();
         for (k, v) in self.headers().iter() {
             vec.push(FieldRep::IncrementalIndexingNewName(
@@ -327,7 +327,7 @@ impl H2Response {
     }
 
     ///Returns a static table index value of ":status".
-    pub fn indexed_status(&self) -> IndexResult {
+    pub fn indexed_status(&self) -> IndexResult<'_> {
         match self.status.as_str() {
             "200" => IndexResult::Both(8),
             "204" => IndexResult::Both(9),
@@ -343,7 +343,7 @@ impl H2Response {
     ///Converts fields to `FieldRep` vec.
     ///
     ///This function is used for test, maybe not meet your requirements.
-    pub fn pseudo_rep(&self) -> Vec<FieldRep> {
+    pub fn pseudo_rep(&self) -> Vec<FieldRep<'_>> {
         let mut vec = Vec::new();
         index_to_rep(self.indexed_status(), &mut vec);
         vec
@@ -352,7 +352,7 @@ impl H2Response {
     ///Converts fields to `FieldRep` vec.
     ///
     ///This function is used for test, maybe not meet your requirements.
-    pub fn headers_rep(&self) -> Vec<FieldRep> {
+    pub fn headers_rep(&self) -> Vec<FieldRep<'_>> {
         let mut vec = Vec::new();
         for (k, v) in self.headers().iter() {
             vec.push(FieldRep::IncrementalIndexingNewName(
