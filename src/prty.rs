@@ -53,7 +53,7 @@ impl FieldValue {
     }
 
     ///Returns an iterator over self.
-    pub fn iter(&self) -> FieldValueIter {
+    pub fn iter(&self) -> FieldValueIter<'_> {
         FieldValueIter(self, 0)
     }
 
