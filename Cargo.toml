@@ -1,7 +1,7 @@
 [package]
 name = "httpenergy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 keywords = ["http", "web"]
 categories = ["web-programming", "network-programming"]
@@ -9,5 +9,4 @@ categories = ["web-programming", "network-programming"]
 
 [dependencies]
 getset = "*"
-time = { version = "*", features = ["macros", "formatting", "parsing", "local-offset", "serde"] }
-utf8parse = "*"
+derive_more = { version = "*", features = ["full"] }
