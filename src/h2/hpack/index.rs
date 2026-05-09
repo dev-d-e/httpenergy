@@ -1,226 +1,147 @@
-use std::collections::{HashMap, VecDeque};
+use crate::prty::*;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
-///HPACK uses two tables for associating header fields to indexes.
+///Returns an entry in the static table corresponding to the index, or an index in the dynamic table.
+///
 ///The static table and the dynamic table are combined into a single index address space.
-pub trait Indices {
-    ///Dynamic table size
-    fn size(&self) -> usize;
-
-    ///Maximum dynamic table size change
-    fn size_update(&mut self, n: usize);
-
-    ///Entry Eviction
-    fn eviction(&mut self);
-
-    ///A new entry is added to the dynamic table.
-    fn add(&mut self, name: Vec<u8>, value: Vec<u8>);
-
-    ///Returns an entry corresponding to the index.
-    fn get_entry(&self, n: usize) -> Option<(&[u8], &[u8])>;
-
-    ///Returns a name corresponding to the index.
-    fn get_name(&self, n: usize) -> Option<&[u8]> {
-        self.get_entry(n).map(|s| s.0)
-    }
-
-    ///Returns some indexes corresponding to the name-value pair.
-    fn find_name_value(&self, name: &[u8], value: &[u8]) -> Vec<usize>;
-
-    ///Returns some indexes corresponding to the name.
-    fn find_name(&self, name: &[u8]) -> Vec<usize>;
-
-    ///Returns result of finding an index.
-    fn find_an_index<'a>(&self, name: &[u8], value: &'a [u8]) -> IndexResult<'a> {
-        let r = self.find_name_value(name, value);
-        if r.is_empty() {
-            let r = self.find_name(name);
-            if r.is_empty() {
-                IndexResult::None
-            } else {
-                IndexResult::One(r[0], value)
-            }
-        } else {
-            IndexResult::Both(r[0])
-        }
+#[inline(always)]
+pub fn static_table_get_entry(n: usize) -> Result<&'static (FieldName, FieldValue), Option<usize>> {
+    if n > 0 && n <= STATIC_TABLE_LEN {
+        Ok(&ENTRY_ARRAY[n - 1])
+    } else if n > STATIC_TABLE_LEN {
+        Err(Some(n - STATIC_TABLE_LEN))
+    } else {
+        Err(None)
     }
 }
 
-///Represents the result of finding an index.
-pub enum IndexResult<'a> {
-    ///Identifies an entry(name-value pair) in either the static table or the dynamic table.
-    Both(usize),
-    ///Identifies a name in either the static table or the dynamic table.
-    One(usize, &'a [u8]),
-    ///No index.
-    None,
+///Returns field name in the static table corresponding to the index, or an index in the dynamic table.
+#[inline(always)]
+pub fn static_table_get_name(n: usize) -> Result<&'static FieldName, Option<usize>> {
+    static_table_get_entry(n).map(|(a, _)| a)
 }
 
-///Indexing Tables
-pub struct IndexingTables(usize, VecDeque<(Vec<u8>, Vec<u8>)>);
-
-impl IndexingTables {
-    ///Creates an empty dynamic table.
-    pub fn new() -> Self {
-        Self(4096, VecDeque::new())
-    }
-
-    ///Clears the dynamic table.
-    pub fn clear(&mut self) {
-        self.1.clear();
-    }
-}
-
-impl Indices for IndexingTables {
-    fn size(&self) -> usize {
-        let mut i = 0;
-        for (a, b) in &self.1 {
-            i += a.len() + b.len() + 32;
-        }
-        i
-    }
-
-    fn size_update(&mut self, n: usize) {
-        self.0 = n;
-        self.eviction();
-    }
-
-    fn eviction(&mut self) {
-        while self.size() > self.0 {
-            self.1.pop_back();
-        }
-    }
-
-    fn add(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.1.push_front((name, value));
-        self.eviction();
-    }
-
-    fn get_entry(&self, n: usize) -> Option<(&[u8], &[u8])> {
-        if n > 0 && n <= STATIC_TABLE_LEN {
-            let o = STATIC_TABLE[n - 1];
-            return Some((o.0.as_bytes(), o.1.as_bytes()));
-        } else if n > STATIC_TABLE_LEN {
-            let n = n - STATIC_TABLE_LEN - 1;
-            return self.1.get(n).map(|s| (s.0.as_slice(), s.1.as_slice()));
-        }
-        None
-    }
-
-    fn find_name_value(&self, name: &[u8], value: &[u8]) -> Vec<usize> {
-        let mut v = Vec::new();
-        let mut s = name.to_vec();
-        s.extend_from_slice(value);
-        if let Some(i) = STATIC_TABLE_INDEX.get(&s) {
-            v.push(*i);
-        }
-        for (i, s) in self.1.iter().enumerate() {
-            if s.0 == name && s.1 == value {
-                v.push(i + STATIC_TABLE_LEN + 1);
-            }
-        }
-        v
-    }
-
-    fn find_name(&self, name: &[u8]) -> Vec<usize> {
-        let mut v = Vec::new();
-        if let Some(s) = STATIC_TABLE_INDICES.get(name) {
-            v.extend_from_slice(s);
-        }
-        for (i, a) in self.1.iter().enumerate() {
-            if a.0 == name {
-                v.push(i + STATIC_TABLE_LEN + 1);
-            }
-        }
-        v
-    }
-}
-
-static STATIC_TABLE_INDEX: LazyLock<HashMap<Vec<u8>, usize>> = LazyLock::new(|| {
-    let mut map = HashMap::new();
-    for i in 0..STATIC_TABLE_LEN {
-        let a = STATIC_TABLE[i];
-        let mut v = a.0.as_bytes().to_vec();
-        v.extend_from_slice(a.1.as_bytes());
-        map.insert(v, i + 1);
-    }
-    map
+static ENTRY_ARRAY: LazyLock<[(FieldName, FieldValue); STATIC_TABLE_LEN]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let (a, b) = STATIC_TABLE[i];
+        (a.into(), b.into())
+    })
 });
 
-static STATIC_TABLE_INDICES: LazyLock<HashMap<Vec<u8>, Vec<usize>>> = LazyLock::new(|| {
-    let mut map: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
-    for i in 0..STATIC_TABLE_LEN {
-        let a = STATIC_TABLE[i];
-        if let Some(o) = map.get_mut(a.0.as_bytes()) {
-            o.push(i + 1);
-        } else {
-            map.insert(a.0.as_bytes().to_vec(), vec![i + 1]);
+///Returns an index in the static table corresponding to the entry/name-value pair.
+#[inline(always)]
+pub fn static_table_get_entry_index(name: &[u8], value: &[u8]) -> Option<usize> {
+    ENTRY_MAP.get(&(name, value)).copied()
+}
+
+static ENTRY_MAP: LazyLock<HashMap<(&[u8], &[u8]), usize>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (a, b)) in STATIC_TABLE.iter().enumerate() {
+        v.insert((*a, *b), i + 1);
+    }
+    v
+});
+
+///Returns an index in the static table corresponding to the name.
+#[inline(always)]
+pub fn static_table_get_name_index(name: &[u8]) -> Option<usize> {
+    NAME_MAP.get(name).map(|(n, _)| *n)
+}
+
+///Returns field name in the static table corresponding to the name.
+#[inline(always)]
+pub fn static_table_get_field_name(name: &[u8]) -> Option<&'static FieldName> {
+    NAME_MAP.get(name).map(|(_, o)| *o)
+}
+
+static NAME_MAP: LazyLock<HashMap<&[u8], (usize, &FieldName)>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (o, _)) in STATIC_TABLE.iter().enumerate() {
+        if !v.contains_key(o) {
+            v.insert(*o, (i + 1, &ENTRY_ARRAY[i].0));
         }
     }
-    map
+    v
+});
+
+///Returns field value in the static table corresponding to the value.
+#[inline(always)]
+pub fn static_table_get_value(value: &[u8]) -> Option<&'static FieldValue> {
+    VALUE_MAP.get(value).map(|o| *o)
+}
+
+static VALUE_MAP: LazyLock<HashMap<&[u8], &FieldValue>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (_, o)) in STATIC_TABLE.iter().enumerate() {
+        if !v.contains_key(o) {
+            v.insert(*o, &ENTRY_ARRAY[i].1);
+        }
+    }
+    v
 });
 
 const STATIC_TABLE_LEN: usize = 61;
-const STATIC_TABLE: [(&str, &str); STATIC_TABLE_LEN] = [
-    (":authority", ""),
-    (":method", "GET"),
-    (":method", "POST"),
-    (":path", "/"),
-    (":path", "/index.html"),
-    (":scheme", "http"),
-    (":scheme", "https"),
-    (":status", "200"),
-    (":status", "204"),
-    (":status", "206"),
-    (":status", "304"),
-    (":status", "400"),
-    (":status", "404"),
-    (":status", "500"),
-    ("accept-charset", ""),
-    ("accept-encoding", "gzip, deflate"),
-    ("accept-language", ""),
-    ("accept-ranges", ""),
-    ("accept", ""),
-    ("access-control-allow-origin", ""),
-    ("age", ""),
-    ("allow", ""),
-    ("authorization", ""),
-    ("cache-control", ""),
-    ("content-disposition", ""),
-    ("content-encoding", ""),
-    ("content-language", ""),
-    ("content-length", ""),
-    ("content-location", ""),
-    ("content-range", ""),
-    ("content-type", ""),
-    ("cookie", ""),
-    ("date", ""),
-    ("etag", ""),
-    ("expect", ""),
-    ("expires", ""),
-    ("from", ""),
-    ("host", ""),
-    ("if-match", ""),
-    ("if-modified-since", ""),
-    ("if-none-match", ""),
-    ("if-range", ""),
-    ("if-unmodified-since", ""),
-    ("last-modified", ""),
-    ("link", ""),
-    ("location", ""),
-    ("max-forwards", ""),
-    ("proxy-authenticate", ""),
-    ("proxy-authorization", ""),
-    ("range", ""),
-    ("referer", ""),
-    ("refresh", ""),
-    ("retry-after", ""),
-    ("server", ""),
-    ("set-cookie", ""),
-    ("strict-transport-security", ""),
-    ("transfer-encoding", ""),
-    ("user-agent", ""),
-    ("vary", ""),
-    ("via", ""),
-    ("www-authenticate", ""),
+const STATIC_TABLE: [(&[u8], &[u8]); STATIC_TABLE_LEN] = [
+    (b":authority", b""),
+    (b":method", b"GET"),
+    (b":method", b"POST"),
+    (b":path", b"/"),
+    (b":path", b"/index.html"),
+    (b":scheme", b"http"),
+    (b":scheme", b"https"),
+    (b":status", b"200"),
+    (b":status", b"204"),
+    (b":status", b"206"),
+    (b":status", b"304"),
+    (b":status", b"400"),
+    (b":status", b"404"),
+    (b":status", b"500"),
+    (b"accept-charset", b""),
+    (b"accept-encoding", b"gzip, deflate"),
+    (b"accept-language", b""),
+    (b"accept-ranges", b""),
+    (b"accept", b""),
+    (b"access-control-allow-origin", b""),
+    (b"age", b""),
+    (b"allow", b""),
+    (b"authorization", b""),
+    (b"cache-control", b""),
+    (b"content-disposition", b""),
+    (b"content-encoding", b""),
+    (b"content-language", b""),
+    (b"content-length", b""),
+    (b"content-location", b""),
+    (b"content-range", b""),
+    (b"content-type", b""),
+    (b"cookie", b""),
+    (b"date", b""),
+    (b"etag", b""),
+    (b"expect", b""),
+    (b"expires", b""),
+    (b"from", b""),
+    (b"host", b""),
+    (b"if-match", b""),
+    (b"if-modified-since", b""),
+    (b"if-none-match", b""),
+    (b"if-range", b""),
+    (b"if-unmodified-since", b""),
+    (b"last-modified", b""),
+    (b"link", b""),
+    (b"location", b""),
+    (b"max-forwards", b""),
+    (b"proxy-authenticate", b""),
+    (b"proxy-authorization", b""),
+    (b"range", b""),
+    (b"referer", b""),
+    (b"refresh", b""),
+    (b"retry-after", b""),
+    (b"server", b""),
+    (b"set-cookie", b""),
+    (b"strict-transport-security", b""),
+    (b"transfer-encoding", b""),
+    (b"user-agent", b""),
+    (b"vary", b""),
+    (b"via", b""),
+    (b"www-authenticate", b""),
 ];
