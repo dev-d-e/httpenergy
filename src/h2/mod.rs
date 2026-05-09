@@ -9,43 +9,46 @@ and several assist types and traits for helping to use these functions.
 
 # Examples
 ```
-use httpenergy::h2::frame::FrameDecoder;
-use httpenergy::h2::hpack::IndexingTables;
+use httpenergy::h2::frame::*;
+use httpenergy::h2::hpack::*;
 use httpenergy::h2::*;
+use httpenergy::*;
 
-let mut r = H2Request::with_method("POST");
-r.scheme_mut().replace("https".to_string());
-r.authority_mut().replace("example.org".to_string());
-r.path_mut().replace("/resource".to_string());
-
-let a = r.headers_mut();
-a.add_field("content-type".to_string(), "image/jpeg".into());
-a.add_field("host".to_string(), "example.org".into());
-a.add_field("content-length".to_string(), "123".into());
+let mut r = H2Request::new("POST");
+r.set_scheme(Some("https"));
+r.set_authority(Some("example.org"));
+r.set_path(Some("/resource"));
+r.add_field("content-type", "image/jpeg");
+r.add_field("host", "example.org");
+r.add_field("content-length", "123");
 
 //Converts request into HEADERS frame.
-//You can use `H2EncodeFieldsHelper` or `HeadersEncoder` directly.
-let p = r.pseudo_rep();
-let h = r.headers_rep();
-
-let mut stream_builder = H2StreamIdentifierBuilder::new();
-let mut out = Vec::<Vec<u8>>::new();
-let mut helper = H2EncodeFieldsHelper::new(&mut stream_builder, &mut out);
-helper.pseudo_and_fields(p, h);
-helper.flush();
-let s = &out[0];
+//You can use `HeadersHelper` or `Headers` directly.
+let mut helper = HeadersHelper::new(1, 100, 100);
+handle_request_pseudo_header_fields(&r, &mut helper);
+handle_fields(&r, &mut helper);
+let mut s = Vec::new();
+helper.export(&mut s);
+assert!(s.len() > 0);
 
 //Converts HEADERS frame into request.
-//You can use `H2DecodeFieldsHelper` or `HeadersDecoder` directly.
-let mut index = IndexingTables::new();
-let mut req = H2Request::new();
-match FrameDecoder::decode(s) {
-    FrameDecoder::Headers(o) => {
-        let mut helper = H2DecodeFieldsHelper::new(&mut index, &mut req);
-        helper.headers(o);
+let mut t = DynamicTable::default();
+let mut req = H2Request::default();
+let mut g = s.into_get();
+if let Ok(rst) = get_frame(&mut g) {
+  match rst {
+    FrameResult::Headers(o) => {
+        if let Some(mut f) = o.field_block_fragment(&mut g) {
+            if let Ok(v) = get_hfris_to_vec(f.as_mut()) {
+                let v = update_dynamic_table_to_vec(v, &mut t);
+                add_fields_to_request(v, &mut req);
+            }
+        }
     }
     _ => {}
+  }
 }
+
 assert_eq!(r.method(), req.method());
 assert_eq!(r.scheme(), req.scheme());
 assert_eq!(r.authority(), req.authority());
@@ -59,104 +62,68 @@ pub mod hpack;
 pub(crate) mod huffman;
 pub(crate) mod prty;
 
-use self::hpack::{FieldRep, IndexResult};
-use crate::common::*;
-use crate::Entity;
-use crate::OctetsRef;
+use crate::io::*;
+use crate::prty::*;
 pub use assist::*;
-use getset::{Getters, MutGetters};
-use std::ops::{Deref, DerefMut};
+use derive_more::{Debug, Deref, DerefMut};
 
 ///The ":method" pseudo-header field.
-pub const PSEUDO_METHOD: &str = ":method";
+pub const PSEUDO_METHOD: &[u8] = b":method";
 ///The ":scheme" pseudo-header field.
-pub const PSEUDO_SCHEME: &str = ":scheme";
+pub const PSEUDO_SCHEME: &[u8] = b":scheme";
 ///The ":authority" pseudo-header field.
-pub const PSEUDO_AUTHORITY: &str = ":authority";
+pub const PSEUDO_AUTHORITY: &[u8] = b":authority";
 ///The ":path" pseudo-header field.
-pub const PSEUDO_PATH: &str = ":path";
+pub const PSEUDO_PATH: &[u8] = b":path";
 ///The ":status" pseudo-header field.
-pub const PSEUDO_STATUS: &str = ":status";
+pub const PSEUDO_STATUS: &[u8] = b":status";
 
 ///Represents an HTTP/2 request.
-#[derive(Getters, MutGetters)]
+#[derive(Debug, Default, Deref, DerefMut, Getters, MutGetters)]
 pub struct H2Request {
     #[getset(get = "pub", get_mut = "pub")]
-    method: String,
+    method: FieldValue,
     #[getset(get = "pub", get_mut = "pub")]
-    scheme: Option<String>,
+    scheme: Option<FieldValue>,
     #[getset(get = "pub", get_mut = "pub")]
-    authority: Option<String>,
+    authority: Option<FieldValue>,
     #[getset(get = "pub", get_mut = "pub")]
-    path: Option<String>,
+    path: Option<FieldValue>,
+    #[deref]
+    #[deref_mut]
     headers_body: Entity,
-}
-
-impl Deref for H2Request {
-    type Target = Entity;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.headers_body
-    }
-}
-
-impl DerefMut for H2Request {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.headers_body
-    }
-}
-
-impl std::fmt::Debug for H2Request {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H2Request")
-            .field("method", &self.method)
-            .field("scheme", &self.scheme)
-            .field("authority", &self.authority)
-            .field("path", &self.path)
-            .field("headers", self.headers_body.headers())
-            .field("body len", &self.headers_body.body().len())
-            .field("err", &self.headers_body.err())
-            .finish()
-    }
-}
-
-impl H2DistributeFields for H2Request {
-    fn next_pseudo(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.set_pseudo(&vec_to_str(name), vec_to_str(value));
-    }
-
-    fn next_field(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.headers_mut().add_field(vec_to_str(name), value);
-    }
 }
 
 impl H2Request {
     ///Creates.
-    pub fn new() -> Self {
+    pub fn new(method: impl Into<FieldValue>) -> Self {
         Self {
-            method: String::new(),
+            method: method.into(),
             scheme: None,
             authority: None,
             path: None,
-            headers_body: Entity::new(),
+            headers_body: Default::default(),
         }
     }
 
-    ///Creates.
-    pub fn with_method(method: &str) -> Self {
-        Self {
-            method: method.to_string(),
-            scheme: None,
-            authority: None,
-            path: None,
-            headers_body: Entity::new(),
-        }
+    ///Sets scheme.
+    pub fn set_scheme(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.scheme = value.map(|o| o.into());
+    }
+
+    ///Sets authority.
+    pub fn set_authority(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.authority = value.map(|o| o.into());
+    }
+
+    ///Sets path.
+    pub fn set_path(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.path = value.map(|o| o.into());
     }
 
     ///Sets a pseudo-header field.
-    pub fn set_pseudo(&mut self, name: &str, value: String) {
+    pub fn set_pseudo(&mut self, name: &[u8], value: impl Into<FieldValue>) {
+        let value = value.into();
         match name {
             PSEUDO_METHOD => {
                 self.method = value;
@@ -175,191 +142,93 @@ impl H2Request {
     }
 
     ///Returns a static table index value of ":method".
-    pub fn indexed_method(&self) -> IndexResult<'_> {
-        match self.method.as_str() {
-            "GET" => IndexResult::Both(2),
-            "POST" => IndexResult::Both(3),
-            _ => IndexResult::One(2, self.method.as_bytes()),
+    pub fn indexed_method(&self) -> IndexRef<'_> {
+        match self.method.as_bytes() {
+            b"GET" => IndexRef::Both(2),
+            b"POST" => IndexRef::Both(3),
+            _ => IndexRef::One(2, self.method.as_bytes()),
         }
     }
 
-    ///Returns a static table index value of ":scheme" or None if scheme is None.
-    pub fn indexed_scheme(&self) -> IndexResult<'_> {
-        if let Some(scheme) = &self.scheme {
-            match scheme.as_str() {
-                "http" => IndexResult::Both(6),
-                "https" => IndexResult::Both(7),
-                _ => IndexResult::One(6, scheme.as_bytes()),
-            }
-        } else {
-            IndexResult::None
-        }
+    ///Returns a static table index value of ":scheme" or None.
+    pub fn indexed_scheme(&self) -> Option<IndexRef<'_>> {
+        self.scheme.as_ref().map(|scheme| match scheme.as_bytes() {
+            b"http" => IndexRef::Both(6),
+            b"https" => IndexRef::Both(7),
+            _ => IndexRef::One(6, scheme.as_bytes()),
+        })
     }
 
-    ///Returns a static table index value of ":authority" or None if authority is None.
-    pub fn indexed_authority(&self) -> IndexResult<'_> {
-        if let Some(authority) = &self.authority {
+    ///Returns a static table index value of ":authority" or None.
+    pub fn indexed_authority(&self) -> Option<IndexRef<'_>> {
+        self.authority.as_ref().map(|authority| {
             if authority.is_empty() {
-                IndexResult::Both(1)
+                IndexRef::Both(1)
             } else {
-                IndexResult::One(1, authority.as_bytes())
+                IndexRef::One(1, authority.as_bytes())
             }
-        } else {
-            IndexResult::None
-        }
+        })
     }
 
-    ///Returns a static table index value of ":path" or None if path is None.
-    pub fn indexed_path(&self) -> IndexResult<'_> {
-        if let Some(path) = &self.path {
-            match path.as_str() {
-                "/" => IndexResult::Both(4),
-                "/index.html" => IndexResult::Both(5),
-                _ => IndexResult::One(4, path.as_bytes()),
-            }
-        } else {
-            IndexResult::None
-        }
-    }
-
-    ///Converts fields to `FieldRep` vec.
-    ///
-    ///This function is used for test, maybe not meet your requirements.
-    pub fn pseudo_rep(&self) -> Vec<FieldRep<'_>> {
-        let mut vec = Vec::new();
-        index_to_rep(self.indexed_method(), &mut vec);
-        index_to_rep(self.indexed_scheme(), &mut vec);
-        index_to_rep(self.indexed_authority(), &mut vec);
-        index_to_rep(self.indexed_path(), &mut vec);
-        vec
-    }
-
-    ///Converts fields to `FieldRep` vec.
-    ///
-    ///This function is used for test, maybe not meet your requirements.
-    pub fn headers_rep(&self) -> Vec<FieldRep<'_>> {
-        let mut vec = Vec::new();
-        for (k, v) in self.headers().iter() {
-            vec.push(FieldRep::IncrementalIndexingNewName(
-                OctetsRef::new(k.as_bytes()),
-                OctetsRef::new(v.one()),
-            ));
-        }
-        vec
-    }
-}
-
-#[inline]
-fn index_to_rep<'a>(r: IndexResult<'a>, vec: &mut Vec<FieldRep<'a>>) {
-    match r {
-        IndexResult::Both(i) => {
-            vec.push(FieldRep::Indexed(i));
-        }
-        IndexResult::One(i, o) => {
-            vec.push(FieldRep::WithoutIndexingIndexedName(i, OctetsRef::new(o)));
-        }
-        IndexResult::None => {}
+    ///Returns a static table index value of ":path" or None.
+    pub fn indexed_path(&self) -> Option<IndexRef<'_>> {
+        self.path.as_ref().map(|path| match path.as_bytes() {
+            b"/" => IndexRef::Both(4),
+            b"/index.html" => IndexRef::Both(5),
+            _ => IndexRef::One(4, path.as_bytes()),
+        })
     }
 }
 
 ///Represents an HTTP/2 response.
-#[derive(Getters, MutGetters)]
+#[derive(Debug, Default, Deref, DerefMut, Getters, MutGetters)]
 pub struct H2Response {
     #[getset(get = "pub", get_mut = "pub")]
-    status: String,
+    status: FieldValue,
+    #[deref]
+    #[deref_mut]
     headers_body: Entity,
-}
-
-impl Deref for H2Response {
-    type Target = Entity;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.headers_body
-    }
-}
-
-impl DerefMut for H2Response {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.headers_body
-    }
-}
-
-impl std::fmt::Debug for H2Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H2Response")
-            .field("status", &self.status)
-            .field("headers", self.headers_body.headers())
-            .field("body len", &self.headers_body.body().len())
-            .field("err", &self.headers_body.err())
-            .finish()
-    }
-}
-
-impl H2DistributeFields for H2Response {
-    fn next_pseudo(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.set_pseudo(&vec_to_str(name), vec_to_str(value));
-    }
-
-    fn next_field(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.headers_mut().add_field(vec_to_str(name), value);
-    }
 }
 
 impl H2Response {
     ///Creates.
-    pub fn new(status: &str) -> Self {
+    pub fn new(status: impl Into<FieldValue>) -> Self {
         Self {
-            status: status.to_string(),
-            headers_body: Entity::new(),
+            status: status.into(),
+            headers_body: Default::default(),
         }
     }
 
     ///Sets a pseudo-header field.
-    pub fn set_pseudo(&mut self, name: &str, value: String) {
+    pub fn set_pseudo(&mut self, name: &[u8], value: impl Into<FieldValue>) {
         match name {
             PSEUDO_STATUS => {
-                self.status = value;
+                self.status = value.into();
             }
             _ => {}
         }
     }
 
     ///Returns a static table index value of ":status".
-    pub fn indexed_status(&self) -> IndexResult<'_> {
-        match self.status.as_str() {
-            "200" => IndexResult::Both(8),
-            "204" => IndexResult::Both(9),
-            "206" => IndexResult::Both(10),
-            "304" => IndexResult::Both(11),
-            "400" => IndexResult::Both(12),
-            "404" => IndexResult::Both(13),
-            "500" => IndexResult::Both(14),
-            _ => IndexResult::One(8, self.status.as_bytes()),
+    pub fn indexed_status(&self) -> IndexRef<'_> {
+        match self.status.as_bytes() {
+            b"200" => IndexRef::Both(8),
+            b"204" => IndexRef::Both(9),
+            b"206" => IndexRef::Both(10),
+            b"304" => IndexRef::Both(11),
+            b"400" => IndexRef::Both(12),
+            b"404" => IndexRef::Both(13),
+            b"500" => IndexRef::Both(14),
+            _ => IndexRef::One(8, self.status.as_bytes()),
         }
     }
+}
 
-    ///Converts fields to `FieldRep` vec.
-    ///
-    ///This function is used for test, maybe not meet your requirements.
-    pub fn pseudo_rep(&self) -> Vec<FieldRep<'_>> {
-        let mut vec = Vec::new();
-        index_to_rep(self.indexed_status(), &mut vec);
-        vec
-    }
-
-    ///Converts fields to `FieldRep` vec.
-    ///
-    ///This function is used for test, maybe not meet your requirements.
-    pub fn headers_rep(&self) -> Vec<FieldRep<'_>> {
-        let mut vec = Vec::new();
-        for (k, v) in self.headers().iter() {
-            vec.push(FieldRep::IncrementalIndexingNewName(
-                OctetsRef::new(k.as_bytes()),
-                OctetsRef::new(v.one()),
-            ));
-        }
-        vec
-    }
+///Represents reference to an existing table entry.
+#[repr(u8)]
+pub enum IndexRef<'a> {
+    ///Identifies an entry(name-value pair) in either the static table or the dynamic table.
+    Both(usize),
+    ///Identifies a name in either the static table or the dynamic table.
+    One(usize, &'a [u8]),
 }
