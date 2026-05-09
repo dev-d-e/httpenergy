@@ -1,255 +1,186 @@
-use crate::common::*;
-use getset::CopyGetters;
-use std::collections::VecDeque;
+use crate::prty::*;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
-///A trait for dynamic table index address space.
-pub trait DynamicIndices {
-    ///Dynamic table size
-    fn size(&self) -> usize;
-
-    ///Set Dynamic Table Capacity
-    fn set_capacity(&mut self, n: usize);
-
-    ///Count of entries inserted
-    fn max_absolute(&self) -> usize;
-
-    ///Entry Eviction
-    fn eviction(&mut self);
-
-    ///A new entry is added to the dynamic table.
-    fn add(&mut self, name: Vec<u8>, value: Vec<u8>);
-
-    ///Returns an entry corresponding to the index.
-    fn get_entry(&self, n: usize) -> Option<(&[u8], &[u8])>;
-
-    ///Returns a name corresponding to the index.
-    fn get_name(&self, n: usize) -> Option<&[u8]> {
-        self.get_entry(n).map(|s| s.0)
-    }
-
-    ///Returns some indexes corresponding to the name-value pair.
-    fn find_name_value(&self, name: &[u8], value: &[u8]) -> Vec<usize>;
-
-    ///Returns some indexes corresponding to the name.
-    fn find_name(&self, name: &[u8]) -> Vec<usize>;
+///Returns an entry in the static table corresponding to the index.
+#[inline(always)]
+pub fn static_table_get_entry(n: usize) -> Option<&'static (FieldName, FieldValue)> {
+    ENTRY_ARRAY.get(n)
 }
 
-///Dynamic Table.
-#[derive(CopyGetters)]
-pub struct DynamicTable {
-    #[getset(get_copy = "pub")]
-    capacity: usize,
-    absolute: usize,
-    buffer: VecDeque<(Vec<u8>, Vec<u8>)>,
+///Returns field name in the static table corresponding to the index.
+#[inline(always)]
+pub fn static_table_get_name(n: usize) -> Option<&'static FieldName> {
+    ENTRY_ARRAY.get(n).map(|(a, _)| a)
 }
 
-impl std::fmt::Debug for DynamicTable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list()
-            .entries(self.buffer.iter().map(|(a, b)| (into_str(a), into_str(b))))
-            .finish()
-    }
+static ENTRY_ARRAY: LazyLock<[(FieldName, FieldValue); STATIC_TABLE_LEN]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let (a, b) = STATIC_TABLE[i];
+        (a.into(), b.into())
+    })
+});
+
+///Returns an index in the static table corresponding to the entry/name-value pair.
+#[inline(always)]
+pub fn static_table_get_entry_index(name: &[u8], value: &[u8]) -> Option<usize> {
+    ENTRY_MAP.get(&(name, value)).copied()
 }
 
-impl DynamicTable {
-    ///Creates an empty dynamic table with capacity 4096.
-    pub fn new() -> Self {
-        Self {
-            capacity: 4096,
-            absolute: 0,
-            buffer: VecDeque::new(),
-        }
+static ENTRY_MAP: LazyLock<HashMap<(&[u8], &[u8]), usize>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (a, b)) in STATIC_TABLE.iter().enumerate() {
+        v.insert((*a, *b), i);
     }
+    v
+});
 
-    ///Clears the dynamic table.
-    pub fn clear(&mut self) {
-        self.buffer.clear();
-    }
+///Returns an index in the static table corresponding to the name.
+#[inline(always)]
+pub fn static_table_get_name_index(name: &[u8]) -> Option<usize> {
+    NAME_MAP.get(name).map(|(n, _)| *n)
 }
 
-impl DynamicIndices for DynamicTable {
-    fn size(&self) -> usize {
-        let mut i = 0;
-        for (a, b) in &self.buffer {
-            i += a.len() + b.len() + 32;
-        }
-        i
-    }
-
-    fn set_capacity(&mut self, n: usize) {
-        self.capacity = n;
-        self.eviction();
-    }
-
-    fn max_absolute(&self) -> usize {
-        self.absolute
-    }
-
-    fn eviction(&mut self) {
-        while self.size() > self.capacity {
-            self.buffer.pop_back();
-        }
-    }
-
-    fn add(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.buffer.push_front((name, value));
-        self.absolute += 1;
-        self.eviction();
-    }
-
-    fn get_entry(&self, n: usize) -> Option<(&[u8], &[u8])> {
-        self.buffer.get(n).map(|s| (s.0.as_slice(), s.1.as_slice()))
-    }
-
-    fn find_name_value(&self, name: &[u8], value: &[u8]) -> Vec<usize> {
-        let mut v = Vec::new();
-        for (i, s) in self.buffer.iter().enumerate() {
-            if s.0 == name && s.1 == value {
-                v.push(i);
-            }
-        }
-        v
-    }
-
-    fn find_name(&self, name: &[u8]) -> Vec<usize> {
-        let mut v = Vec::new();
-        for (i, a) in self.buffer.iter().enumerate() {
-            if a.0 == name {
-                v.push(i);
-            }
-        }
-        v
-    }
+///Returns field name in the static table corresponding to the name.
+#[inline(always)]
+pub fn static_table_get_field_name(name: &[u8]) -> Option<&'static FieldName> {
+    NAME_MAP.get(name).map(|(_, o)| *o)
 }
 
-///Static Table.
-pub struct StaticTable;
-
-impl StaticTable {
-    ///Returns an entry corresponding to the index.
-    pub fn get_entry(n: usize) -> Option<(&'static [u8], &'static [u8])> {
-        if n < STATIC_TABLE_LEN {
-            let o = STATIC_TABLE[n];
-            Some((o.0.as_bytes(), o.1.as_bytes()))
-        } else {
-            None
+static NAME_MAP: LazyLock<HashMap<&[u8], (usize, &FieldName)>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (o, _)) in STATIC_TABLE.iter().enumerate() {
+        if !v.contains_key(o) {
+            v.insert(*o, (i, &ENTRY_ARRAY[i].0));
         }
     }
+    v
+});
 
-    ///Returns a name corresponding to the index.
-    pub fn get_name(n: usize) -> Option<&'static [u8]> {
-        Self::get_entry(n).map(|s| s.0)
-    }
+///Returns field value in the static table corresponding to the value.
+#[inline(always)]
+pub fn static_table_get_value(value: &[u8]) -> Option<&'static FieldValue> {
+    VALUE_MAP.get(value).map(|o| *o)
 }
+
+static VALUE_MAP: LazyLock<HashMap<&[u8], &FieldValue>> = LazyLock::new(|| {
+    let mut v = HashMap::new();
+    for (i, (_, o)) in STATIC_TABLE.iter().enumerate() {
+        if !v.contains_key(o) {
+            v.insert(*o, &ENTRY_ARRAY[i].1);
+        }
+    }
+    v
+});
 
 const STATIC_TABLE_LEN: usize = 99;
-const STATIC_TABLE: [(&str, &str); STATIC_TABLE_LEN] = [
-    (":authority", ""),
-    (":path", "/"),
-    ("age", "0"),
-    ("content-disposition", ""),
-    ("content-length", "0"),
-    ("cookie", ""),
-    ("date", ""),
-    ("etag", ""),
-    ("if-modified-since", ""),
-    ("if-none-match", ""),
-    ("last-modified", ""),
-    ("link", ""),
-    ("location", ""),
-    ("referer", ""),
-    ("set-cookie", ""),
-    (":method", "CONNECT"),
-    (":method", "DELETE"),
-    (":method", "GET"),
-    (":method", "HEAD"),
-    (":method", "OPTIONS"),
-    (":method", "POST"),
-    (":method", "PUT"),
-    (":scheme", "http"),
-    (":scheme", "https"),
-    (":status", "103"),
-    (":status", "200"),
-    (":status", "304"),
-    (":status", "404"),
-    (":status", "503"),
-    ("accept", "*/*"),
-    ("accept", "application/dns-message"),
-    ("accept-encoding", "gzip, deflate, br"),
-    ("accept-ranges", "bytes"),
-    ("access-control-allow-headers", "cache-control"),
-    ("access-control-allow-headers", "content-type"),
-    ("access-control-allow-origin", "*"),
-    ("cache-control", "max-age=0"),
-    ("cache-control", "max-age=2592000"),
-    ("cache-control", "max-age=604800"),
-    ("cache-control", "no-cache"),
-    ("cache-control", "no-store"),
-    ("cache-control", "public, max-age=31536000"),
-    ("content-encoding", "br"),
-    ("content-encoding", "gzip"),
-    ("content-type", "application/dns-message"),
-    ("content-type", "application/javascript"),
-    ("content-type", "application/json"),
-    ("content-type", "application/x-www-form-urlencoded"),
-    ("content-type", "image/gif"),
-    ("content-type", "image/jpeg"),
-    ("content-type", "image/png"),
-    ("content-type", "text/css"),
-    ("content-type", "text/html; charset=utf-8"),
-    ("content-type", "text/plain"),
-    ("content-type", "text/plain;charset=utf-8"),
-    ("range", "bytes=0-"),
-    ("strict-transport-security", "max-age=31536000"),
+const STATIC_TABLE: [(&[u8], &[u8]); STATIC_TABLE_LEN] = [
+    (b":authority", b""),
+    (b":path", b"/"),
+    (b"age", b"0"),
+    (b"content-disposition", b""),
+    (b"content-length", b"0"),
+    (b"cookie", b""),
+    (b"date", b""),
+    (b"etag", b""),
+    (b"if-modified-since", b""),
+    (b"if-none-match", b""),
+    (b"last-modified", b""),
+    (b"link", b""),
+    (b"location", b""),
+    (b"referer", b""),
+    (b"set-cookie", b""),
+    (b":method", b"CONNECT"),
+    (b":method", b"DELETE"),
+    (b":method", b"GET"),
+    (b":method", b"HEAD"),
+    (b":method", b"OPTIONS"),
+    (b":method", b"POST"),
+    (b":method", b"PUT"),
+    (b":scheme", b"http"),
+    (b":scheme", b"https"),
+    (b":status", b"103"),
+    (b":status", b"200"),
+    (b":status", b"304"),
+    (b":status", b"404"),
+    (b":status", b"503"),
+    (b"accept", b"*/*"),
+    (b"accept", b"application/dns-message"),
+    (b"accept-encoding", b"gzip, deflate, br"),
+    (b"accept-ranges", b"bytes"),
+    (b"access-control-allow-headers", b"cache-control"),
+    (b"access-control-allow-headers", b"content-type"),
+    (b"access-control-allow-origin", b"*"),
+    (b"cache-control", b"max-age=0"),
+    (b"cache-control", b"max-age=2592000"),
+    (b"cache-control", b"max-age=604800"),
+    (b"cache-control", b"no-cache"),
+    (b"cache-control", b"no-store"),
+    (b"cache-control", b"public, max-age=31536000"),
+    (b"content-encoding", b"br"),
+    (b"content-encoding", b"gzip"),
+    (b"content-type", b"application/dns-message"),
+    (b"content-type", b"application/javascript"),
+    (b"content-type", b"application/json"),
+    (b"content-type", b"application/x-www-form-urlencoded"),
+    (b"content-type", b"image/gif"),
+    (b"content-type", b"image/jpeg"),
+    (b"content-type", b"image/png"),
+    (b"content-type", b"text/css"),
+    (b"content-type", b"text/html; charset=utf-8"),
+    (b"content-type", b"text/plain"),
+    (b"content-type", b"text/plain;charset=utf-8"),
+    (b"range", b"bytes=0-"),
+    (b"strict-transport-security", b"max-age=31536000"),
     (
-        "strict-transport-security",
-        "max-age=31536000; includesubdomains",
+        b"strict-transport-security",
+        b"max-age=31536000; includesubdomains",
     ),
     (
-        "strict-transport-security",
-        "max-age=31536000; includesubdomains; preload",
+        b"strict-transport-security",
+        b"max-age=31536000; includesubdomains; preload",
     ),
-    ("vary", "accept-encoding"),
-    ("vary", "origin"),
-    ("x-content-type-options", "nosniff"),
-    ("x-xss-protection", "1; mode=block"),
-    (":status", "100"),
-    (":status", "204"),
-    (":status", "206"),
-    (":status", "302"),
-    (":status", "400"),
-    (":status", "403"),
-    (":status", "421"),
-    (":status", "425"),
-    (":status", "500"),
-    ("accept-language", ""),
-    ("access-control-allow-credentials", "FALSE"),
-    ("access-control-allow-credentials", "TRUE"),
-    ("access-control-allow-headers", "*"),
-    ("access-control-allow-methods", "get"),
-    ("access-control-allow-methods", "get, post, options"),
-    ("access-control-allow-methods", "options"),
-    ("access-control-expose-headers", "content-length"),
-    ("access-control-request-headers", "content-type"),
-    ("access-control-request-method", "get"),
-    ("access-control-request-method", "post"),
-    ("alt-svc", "clear"),
-    ("authorization", ""),
+    (b"vary", b"accept-encoding"),
+    (b"vary", b"origin"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-xss-protection", b"1; mode=block"),
+    (b":status", b"100"),
+    (b":status", b"204"),
+    (b":status", b"206"),
+    (b":status", b"302"),
+    (b":status", b"400"),
+    (b":status", b"403"),
+    (b":status", b"421"),
+    (b":status", b"425"),
+    (b":status", b"500"),
+    (b"accept-language", b""),
+    (b"access-control-allow-credentials", b"FALSE"),
+    (b"access-control-allow-credentials", b"TRUE"),
+    (b"access-control-allow-headers", b"*"),
+    (b"access-control-allow-methods", b"get"),
+    (b"access-control-allow-methods", b"get, post, options"),
+    (b"access-control-allow-methods", b"options"),
+    (b"access-control-expose-headers", b"content-length"),
+    (b"access-control-request-headers", b"content-type"),
+    (b"access-control-request-method", b"get"),
+    (b"access-control-request-method", b"post"),
+    (b"alt-svc", b"clear"),
+    (b"authorization", b""),
     (
-        "content-security-policy",
-        "script-src 'none'; object-src 'none'; base-uri 'none'",
+        b"content-security-policy",
+        b"script-src 'none'; object-src 'none'; base-uri 'none'",
     ),
-    ("early-data", "1"),
-    ("expect-ct", ""),
-    ("forwarded", ""),
-    ("if-range", ""),
-    ("origin", ""),
-    ("purpose", "prefetch"),
-    ("server", ""),
-    ("timing-allow-origin", "*"),
-    ("upgrade-insecure-requests", "1"),
-    ("user-agent", ""),
-    ("x-forwarded-for", ""),
-    ("x-frame-options", "deny"),
-    ("x-frame-options", "sameorigin"),
+    (b"early-data", b"1"),
+    (b"expect-ct", b""),
+    (b"forwarded", b""),
+    (b"if-range", b""),
+    (b"origin", b""),
+    (b"purpose", b"prefetch"),
+    (b"server", b""),
+    (b"timing-allow-origin", b"*"),
+    (b"upgrade-insecure-requests", b"1"),
+    (b"user-agent", b""),
+    (b"x-forwarded-for", b""),
+    (b"x-frame-options", b"deny"),
+    (b"x-frame-options", b"sameorigin"),
 ];
