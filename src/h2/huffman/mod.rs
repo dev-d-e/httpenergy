@@ -1,51 +1,51 @@
 mod assist;
 
-use crate::WriteByte;
+use super::*;
 use assist::*;
 use std::collections::{HashMap, HashSet};
 
 ///Encodes a slice into huffman encoded.
-pub(crate) fn encode_huffman(reader: &[u8], writer: &mut impl WriteByte) {
+pub(crate) fn encode_huffman(s: &[u8], o: &mut dyn PutU8) {
     let mut buffer: u64 = 0;
     let mut count = 40;
-    for &i in reader {
+    for &i in s {
         let (h, n) = HUFFMAN_CODE[i as usize];
         let h = h as u64;
         let h = h << (count - n);
         buffer |= h;
         count -= n;
         while count <= 32 {
-            writer.put((buffer >> 32) as u8);
+            o.put_u8((buffer >> 32) as u8);
             buffer = buffer << 8;
             count += 8;
         }
     }
     if count != 40 {
         buffer |= (1 << count) - 1;
-        writer.put((buffer >> 32) as u8);
+        o.put_u8((buffer >> 32) as u8);
     }
 }
 
 ///Decodes a huffman encoded slice.
-pub(crate) fn decode_huffman(reader: &[u8], writer: &mut impl WriteByte) {
+pub(crate) fn decode_huffman(s: &[u8], o: &mut dyn PutU8) {
     let mut x = 0;
-    for &i in reader {
-        let o = DECODE_STATE_ARRAY[x as usize];
+    for &i in s {
+        let a = DECODE_STATE_ARRAY[x as usize];
         let y = (i >> 4) as usize;
-        x = o[y].0;
-        let n = o[y].1;
+        x = a[y].0;
+        let n = a[y].1;
         if n >= 0 && n < 256 {
-            writer.put(n as u8);
+            o.put_u8(n as u8);
         } else if n == 256 {
             return;
         }
 
-        let o = DECODE_STATE_ARRAY[x as usize];
+        let a = DECODE_STATE_ARRAY[x as usize];
         let y = (i & 0x0f) as usize;
-        x = o[y].0;
-        let n = o[y].1;
+        x = a[y].0;
+        let n = a[y].1;
         if n >= 0 && n < 256 {
-            writer.put(n as u8);
+            o.put_u8(n as u8);
         } else if n == 256 {
             return;
         }
