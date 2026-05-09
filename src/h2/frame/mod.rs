@@ -1,20 +1,16 @@
 /*!
 Utilities for the frame.
 
-This module provides several encoder and decoder types for working with frames.
+This module provides several types and functions for working with frames.
 
-# encoder
-Each frame type can create a new encoder, then encode to a `WriteByte`.
+Each frame type can be created, then use export method.
 
-# decoder
-To parse a frame, you can use [`FrameDecoder`] to decode a byte slice, returns a specific frame type.
+To parse a frame, you can use [`get_frame`], returns a specific frame type.
 */
 
-use super::hpack::{DistributeInstructions, Instructions};
-use crate::{ReadByte, WriteByte};
-use getset::{CopyGetters, Getters, MutGetters, Setters};
-use std::collections::HashSet;
-use std::io::Error;
+use super::*;
+use derive_more::{Debug, From};
+use std::num::NonZeroUsize;
 
 const FRAME_HEADER_LENGTH: usize = 9;
 const MAX_FRAME_LENGTH: usize = 16777215;
@@ -43,130 +39,89 @@ const STREAM_IDENTIFIER_ZERO: u32 = 0;
 const EXCLUSIVE: u8 = 0b1000_0000;
 
 #[inline(always)]
-fn check_capacity(capacity: usize) -> usize {
-    match capacity {
+fn check_capacity(capacity: usize) -> NonZeroUsize {
+    let n = match capacity {
         0 => 4096,
         1..MAX_FRAME_LENGTH => capacity,
         _ => MAX_FRAME_LENGTH,
-    }
+    };
+    unsafe { NonZeroUsize::new_unchecked(n) }
 }
 
 #[inline(always)]
-fn fill_header(
-    length: u32,
-    frame_type: u8,
-    flags: u8,
-    stream_identifier: u32,
-    o: &mut impl WriteByte,
-) -> Option<Error> {
+fn bit_eq(i: u8, f: u8) -> bool {
+    i & f == f
+}
+
+#[inline(always)]
+fn fill_header(length: u32, frame_type: u8, flags: u8, stream: u32, o: &mut dyn PutU8) -> bool {
     let a = length.to_be_bytes();
-    let b = stream_identifier.to_be_bytes();
-    o.put_all(&a[1..]);
-    o.put(frame_type);
-    o.put(flags);
-    o.put(b[0] & RESERVED);
-    o.put_all(&b[1..])
+    let b = stream.to_be_bytes();
+    o.put_exact(&a[1..]);
+    o.put_u8(frame_type);
+    o.put_u8(flags);
+    o.put_u8(b[0] & RESERVED);
+    o.put_exact(&b[1..])
 }
 
 #[inline(always)]
-fn fill_priority(
-    exclusive: bool,
-    stream_dependency: u32,
-    weight: u8,
-    o: &mut impl WriteByte,
-) -> Option<Error> {
+fn fill_priority(exclusive: bool, stream_dependency: u32, weight: u8, o: &mut dyn PutU8) -> bool {
     let a = stream_dependency.to_be_bytes();
     if exclusive {
-        o.put(a[0] | EXCLUSIVE);
+        o.put_u8(a[0] | EXCLUSIVE);
     } else {
-        o.put(a[0] & RESERVED);
+        o.put_u8(a[0] & RESERVED);
     }
-    o.put_all(&a[1..]);
-    o.put(weight)
+    o.put_exact(&a[1..]);
+    o.put_u8(weight)
 }
 
 #[inline(always)]
-fn fill_stream_id(stream_id: u32, writer: &mut impl WriteByte) -> Option<Error> {
+fn fill_stream_id(stream_id: u32, o: &mut dyn PutU8) -> bool {
     let a = stream_id.to_be_bytes();
-    writer.put(a[0] & RESERVED);
-    writer.put_all(&a[1..])
-}
-
-#[inline(always)]
-fn padded(a: bool, b: usize) -> bool {
-    if b >= MAX_FRAME_LENGTH {
-        false
-    } else {
-        a
-    }
-}
-
-#[inline(always)]
-fn length(a: usize) -> u32 {
-    if a <= MAX_FRAME_LENGTH {
-        a as u32
-    } else {
-        MAX_FRAME_LENGTH as u32
-    }
+    o.put_u8(a[0] & RESERVED);
+    o.put_exact(&a[1..])
 }
 
 #[inline(always)]
 fn pad_length(a: usize, b: u8) -> (u32, u8) {
-    if a < MAX_FRAME_LENGTH {
-        let c = a + b as usize;
-        if c <= MAX_FRAME_LENGTH {
-            (c as u32, b)
-        } else {
-            (MAX_FRAME_LENGTH as u32, (MAX_FRAME_LENGTH - a) as u8)
-        }
+    let c = a + b as usize;
+    if c <= MAX_FRAME_LENGTH {
+        (c as u32, b)
     } else {
-        (MAX_FRAME_LENGTH as u32, 0)
+        (
+            MAX_FRAME_LENGTH as u32,
+            MAX_FRAME_LENGTH.saturating_sub(a) as u8,
+        )
     }
 }
 
-///A builder which encodes data into DATA frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct DataEncoder {
+///Represents a DATA frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+#[getset(get_copy = "pub", set = "pub")]
+pub struct Data {
+    #[getset(skip)]
     #[getset(get_copy = "pub")]
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     padded: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     end_stream: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     pad_length: u8,
+    #[debug("{}", data.len())]
+    #[getset(skip)]
     #[getset(get = "pub", get_mut = "pub")]
-    data: Vec<u8>,
+    data: FiniteVec,
 }
 
-impl std::fmt::Debug for DataEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("DataEncoder");
-        o.field("stream_identifier", &self.stream_identifier)
-            .field("padded", &self.padded)
-            .field("end_stream", &self.end_stream);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        o.field("data len", &self.data.len()).finish()
-    }
-}
-
-impl DataEncoder {
-    ///Creates with a stream identifier and data capacity.
+impl Data {
+    ///Creates.
     pub fn new(stream_identifier: u32, capacity: usize) -> Self {
         Self {
             stream_identifier,
             padded: false,
             end_stream: false,
             pad_length: 0,
-            data: Vec::with_capacity(check_capacity(capacity)),
+            data: check_capacity(capacity).into(),
         }
-    }
-
-    ///Creates with capacity 16,777,215.
-    pub fn max(stream_identifier: u32) -> Self {
-        Self::new(stream_identifier, MAX_FRAME_LENGTH)
     }
 
     #[inline(always)]
@@ -181,81 +136,50 @@ impl DataEncoder {
         o
     }
 
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        if self.data.len() > MAX_FRAME_LENGTH {
-            Some(self.data.split_off(MAX_FRAME_LENGTH))
-        } else {
-            None
+    ///Exports self into [`PutU8`].
+    pub fn export(mut self, o: &mut dyn PutU8) {
+        if self.padded && self.data.len() >= MAX_FRAME_LENGTH {
+            self.padded = false;
         }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
         let flags = self.flags();
         let stream = self.stream_identifier;
-        if padded(self.padded, self.data.len()) {
+        if self.padded {
             let (length, pad_length) = pad_length(1 + self.data.len(), self.pad_length);
-            fill_header(length, DATA_FRAME_TYPE, flags, stream, writer);
-            writer.put(pad_length);
-            writer.put_all(&self.data);
-            writer.put_repeat(pad_length as usize, 0)
+            fill_header(length, DATA_FRAME_TYPE, flags, stream, o);
+            o.put_u8(pad_length);
+            o.put_exact(&self.data);
+            o.put_repeat(pad_length as usize, 0);
         } else {
-            let length = length(self.data.len());
-            fill_header(length, DATA_FRAME_TYPE, flags, stream, writer);
-            writer.put_all(&self.data)
+            let length = self.data.len() as u32;
+            fill_header(length, DATA_FRAME_TYPE, flags, stream, o);
+            o.put_exact(&self.data);
         }
     }
 }
 
-///A builder which encodes field block into HEADERS frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct HeadersEncoder {
+///Represents a HEADERS frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+#[getset(get_copy = "pub", set = "pub")]
+pub struct Headers {
+    #[getset(skip)]
     #[getset(get_copy = "pub")]
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     priority: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     padded: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     end_headers: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     end_stream: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     pad_length: u8,
-    #[getset(get_copy = "pub", set = "pub")]
     exclusive: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     stream_dependency: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     weight: u8,
+    #[debug("{}", field_block_fragment.len())]
+    #[getset(skip)]
     #[getset(get = "pub", get_mut = "pub")]
-    field_block_fragment: Vec<u8>,
+    field_block_fragment: FiniteVec,
 }
 
-impl std::fmt::Debug for HeadersEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("HeadersEncoder");
-        o.field("stream_identifier", &self.stream_identifier)
-            .field("priority", &self.priority)
-            .field("padded", &self.padded)
-            .field("end_headers", &self.end_headers)
-            .field("end_stream", &self.end_stream);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        if self.priority {
-            o.field("exclusive", &self.exclusive)
-                .field("stream_dependency", &self.stream_dependency)
-                .field("weight", &self.weight);
-        }
-        o.field("field_block_fragment len", &self.field_block_fragment.len())
-            .finish()
-    }
-}
-
-impl HeadersEncoder {
-    ///Creates with a stream identifier and capacity.
+impl Headers {
+    ///Creates.
     pub fn new(stream_identifier: u32, capacity: usize) -> Self {
         Self {
             stream_identifier,
@@ -267,13 +191,8 @@ impl HeadersEncoder {
             exclusive: false,
             stream_dependency: 0,
             weight: 0,
-            field_block_fragment: Vec::with_capacity(check_capacity(capacity)),
+            field_block_fragment: check_capacity(capacity).into(),
         }
-    }
-
-    ///Creates with capacity 16,777,215.
-    pub fn max(stream_identifier: u32) -> Self {
-        Self::new(stream_identifier, MAX_FRAME_LENGTH)
     }
 
     #[inline(always)]
@@ -294,84 +213,65 @@ impl HeadersEncoder {
         o
     }
 
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        let n = if self.priority {
-            MAX_FRAME_LENGTH - 5
-        } else {
-            MAX_FRAME_LENGTH
-        };
-        if self.field_block_fragment.len() > n {
-            Some(self.field_block_fragment.split_off(n))
-        } else {
-            None
-        }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
-        let flags = self.flags();
+    ///Exports self into [`PutU8`].
+    pub fn export(mut self, o: &mut dyn PutU8) {
         let stream = self.stream_identifier;
         if self.priority {
             let n = 5 + self.field_block_fragment.len();
-            if padded(self.padded, n) {
+            if self.padded && n >= MAX_FRAME_LENGTH {
+                self.padded = false;
+            }
+            let flags = self.flags();
+            if self.padded {
                 let (length, pad_length) = pad_length(1 + n, self.pad_length);
-                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, writer);
-                writer.put(pad_length);
-                fill_priority(self.exclusive, self.stream_dependency, self.weight, writer);
-                writer.put_all(&self.field_block_fragment);
-                writer.put_repeat(pad_length as usize, 0)
+                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, o);
+                o.put_u8(pad_length);
+                fill_priority(self.exclusive, self.stream_dependency, self.weight, o);
+                o.put_exact(&self.field_block_fragment);
+                o.put_repeat(pad_length as usize, 0);
             } else {
-                let length = length(n);
-                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, writer);
-                fill_priority(self.exclusive, self.stream_dependency, self.weight, writer);
-                writer.put_all(&self.field_block_fragment)
+                let length = n as u32;
+                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, o);
+                fill_priority(self.exclusive, self.stream_dependency, self.weight, o);
+                o.put_exact(&self.field_block_fragment);
             }
         } else {
             let n = self.field_block_fragment.len();
-            if padded(self.padded, n) {
+            if self.padded && n >= MAX_FRAME_LENGTH {
+                self.padded = false;
+            }
+            let flags = self.flags();
+            if self.padded {
                 let (length, pad_length) = pad_length(1 + n, self.pad_length);
-                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, writer);
-                writer.put(pad_length);
-                writer.put_all(&self.field_block_fragment);
-                writer.put_repeat(pad_length as usize, 0)
+                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, o);
+                o.put_u8(pad_length);
+                o.put_exact(&self.field_block_fragment);
+                o.put_repeat(pad_length as usize, 0);
             } else {
-                let length = length(n);
-                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, writer);
-                writer.put_all(&self.field_block_fragment)
+                let length = n as u32;
+                fill_header(length, HEADERS_FRAME_TYPE, flags, stream, o);
+                o.put_exact(&self.field_block_fragment);
             }
         }
     }
 }
 
-const PRIORITY_LENGTH: usize = 0x05;
+const PRIORITY_LENGTH: u32 = 0x05;
 
-///A builder which encodes info into PRIORITY frame.
-#[derive(CopyGetters, Setters)]
-pub struct PriorityEncoder {
+///Represents a PRIORITY frame.
+#[derive(CopyGetters, Debug, Setters)]
+#[getset(get_copy = "pub", set = "pub")]
+pub struct Priority {
+    #[getset(skip)]
     #[getset(get_copy = "pub")]
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     exclusive: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     stream_dependency: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     weight: u8,
 }
 
-impl std::fmt::Debug for PriorityEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PriorityEncoder")
-            .field("stream_identifier", &self.stream_identifier)
-            .field("exclusive", &self.exclusive)
-            .field("stream_dependency", &self.stream_dependency)
-            .field("weight", &self.weight)
-            .finish()
-    }
-}
-
-impl PriorityEncoder {
-    ///Creates with a stream identifier.
+impl Priority {
+    ///Creates.
     pub fn new(stream_identifier: u32) -> Self {
         Self {
             stream_identifier,
@@ -381,171 +281,122 @@ impl PriorityEncoder {
         }
     }
 
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         fill_header(
-            PRIORITY_LENGTH as u32,
+            PRIORITY_LENGTH,
             PRIORITY_FRAME_TYPE,
             UNUSED_FLAGS,
             self.stream_identifier,
-            writer,
+            o,
         );
-        fill_priority(self.exclusive, self.stream_dependency, self.weight, writer)
+        fill_priority(self.exclusive, self.stream_dependency, self.weight, o);
     }
 }
 
-const RST_STREAM_LENGTH: usize = 0x04;
+const RST_STREAM_LENGTH: u32 = 0x04;
 
-///A builder which encodes info into RST_STREAM frame.
-#[derive(CopyGetters, Setters)]
-pub struct RstStreamEncoder {
-    #[getset(get_copy = "pub")]
+///Represents a RST_STREAM frame.
+#[derive(CopyGetters, Debug, Setters)]
+#[getset(get_copy = "pub")]
+pub struct RstStream {
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
+    #[getset(set = "pub")]
     error_code: u32,
 }
 
-impl std::fmt::Debug for RstStreamEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RstStreamEncoder")
-            .field("stream_identifier", &self.stream_identifier)
-            .field("error_code", &self.error_code)
-            .finish()
-    }
-}
-
-impl RstStreamEncoder {
-    ///Creates with a stream identifier.
-    pub fn new(stream_identifier: u32) -> Self {
+impl RstStream {
+    ///Creates.
+    pub fn new(stream_identifier: u32, error_code: u32) -> Self {
         Self {
             stream_identifier,
-            error_code: 0,
+            error_code,
         }
     }
 
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         fill_header(
-            RST_STREAM_LENGTH as u32,
+            RST_STREAM_LENGTH,
             RST_STREAM_FRAME_TYPE,
             UNUSED_FLAGS,
             self.stream_identifier,
-            writer,
+            o,
         );
-        writer.put_u32(self.error_code)
+        u32_to(self.error_code, o);
     }
 }
 
-///A builder which encodes info into SETTINGS frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct SettingsEncoder {
+///Represents a SETTINGS frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+pub struct Settings {
     #[getset(get_copy = "pub", set = "pub")]
     ack: bool,
+    #[debug("{}", setting.len())]
     #[getset(get = "pub", get_mut = "pub")]
-    setting: Vec<u8>,
+    setting: Vec<(u16, u32)>,
 }
 
-impl std::fmt::Debug for SettingsEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SettingsEncoder")
-            .field("ack", &self.ack)
-            .field("setting len", &self.setting.len())
-            .finish()
-    }
-}
-
-impl SettingsEncoder {
-    ///Creates with capacity.
+impl Settings {
+    ///Creates.
     pub fn new(capacity: usize) -> Self {
         Self {
             ack: false,
-            setting: Vec::with_capacity(check_capacity(capacity)),
+            setting: Vec::with_capacity(capacity),
         }
-    }
-
-    ///Creates with capacity 16,777,215.
-    pub fn max() -> Self {
-        Self::new(MAX_FRAME_LENGTH)
     }
 
     #[inline(always)]
     fn flags(&self) -> u8 {
-        if self.ack {
-            ACK_FLAG
-        } else {
-            UNUSED_FLAGS
-        }
+        if self.ack { ACK_FLAG } else { UNUSED_FLAGS }
     }
 
-    ///Appends identifier and value to the back of buffer.
+    ///Add identifier and value.
     pub fn push(&mut self, identifier: u16, value: u32) -> bool {
-        if self.setting.surplus_mut() < 6 {
-            false
-        } else {
-            self.setting.put_u16(identifier);
-            self.setting.put_u32(value);
-            true
+        let r = self.setting.len() < self.setting.capacity();
+        if r {
+            self.setting.push((identifier, value));
         }
+        r
     }
 
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        if self.setting.len() > MAX_FRAME_LENGTH {
-            Some(self.setting.split_off(MAX_FRAME_LENGTH))
-        } else {
-            None
-        }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         let flags = self.flags();
-        let length = length(self.setting.len());
+        let length = self.setting.len() as u32;
         fill_header(
             length,
             SETTINGS_FRAME_TYPE,
             flags,
             STREAM_IDENTIFIER_ZERO,
-            writer,
+            o,
         );
-        writer.put_all(&self.setting)
+        for (identifier, value) in self.setting {
+            u16_to(identifier, o);
+            u32_to(value, o);
+        }
     }
 }
 
-///A builder which encodes field block into PUSH_PROMISE frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct PushPromiseEncoder {
+///Represents a PUSH_PROMISE frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+#[getset(get_copy = "pub", set = "pub")]
+pub struct PushPromise {
+    #[getset(skip)]
     #[getset(get_copy = "pub")]
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     padded: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     end_headers: bool,
-    #[getset(get_copy = "pub", set = "pub")]
     pad_length: u8,
-    #[getset(get_copy = "pub", set = "pub")]
     promised_stream_id: u32,
+    #[debug("{}", field_block_fragment.len())]
+    #[getset(skip)]
     #[getset(get = "pub", get_mut = "pub")]
-    field_block_fragment: Vec<u8>,
+    field_block_fragment: FiniteVec,
 }
 
-impl std::fmt::Debug for PushPromiseEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("PushPromiseEncoder");
-        o.field("stream_identifier", &self.stream_identifier)
-            .field("padded", &self.padded)
-            .field("end_headers", &self.end_headers);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        o.field("promised_stream_id", &self.promised_stream_id)
-            .field("field_block_fragment len", &self.field_block_fragment.len())
-            .finish()
-    }
-}
-
-impl PushPromiseEncoder {
-    ///Creates with a stream identifier and capacity.
+impl PushPromise {
+    ///Creates.
     pub fn new(stream_identifier: u32, capacity: usize) -> Self {
         Self {
             stream_identifier,
@@ -553,13 +404,8 @@ impl PushPromiseEncoder {
             end_headers: false,
             pad_length: 0,
             promised_stream_id: 0,
-            field_block_fragment: Vec::with_capacity(check_capacity(capacity)),
+            field_block_fragment: check_capacity(capacity).into(),
         }
-    }
-
-    ///Creates with capacity 16,777,215.
-    pub fn max(stream_identifier: u32) -> Self {
-        Self::new(stream_identifier, MAX_FRAME_LENGTH)
     }
 
     #[inline(always)]
@@ -574,230 +420,158 @@ impl PushPromiseEncoder {
         o
     }
 
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        let n = MAX_FRAME_LENGTH - 4;
-        if self.field_block_fragment.len() > n {
-            Some(self.field_block_fragment.split_off(n))
-        } else {
-            None
+    ///Exports self into [`PutU8`].
+    pub fn export(mut self, o: &mut dyn PutU8) {
+        let n = 4 + self.field_block_fragment.len();
+        if self.padded && n >= MAX_FRAME_LENGTH {
+            self.padded = false;
         }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
         let flags = self.flags();
         let stream = self.stream_identifier;
-        let n = 4 + self.field_block_fragment.len();
-        if padded(self.padded, n) {
+        if self.padded {
             let (length, pad_length) = pad_length(1 + n, self.pad_length);
-            fill_header(length, PUSH_PROMISE_FRAME_TYPE, flags, stream, writer);
-            writer.put(pad_length);
-            fill_stream_id(self.promised_stream_id, writer);
-            writer.put_all(&self.field_block_fragment);
-            writer.put_repeat(pad_length as usize, 0)
+            fill_header(length, PUSH_PROMISE_FRAME_TYPE, flags, stream, o);
+            o.put_u8(pad_length);
+            fill_stream_id(self.promised_stream_id, o);
+            o.put_exact(&self.field_block_fragment);
+            o.put_repeat(pad_length as usize, 0);
         } else {
-            let length = length(n);
-            fill_header(length, PUSH_PROMISE_FRAME_TYPE, flags, stream, writer);
-            fill_stream_id(self.promised_stream_id, writer);
-            writer.put_all(&self.field_block_fragment)
+            let length = n as u32;
+            fill_header(length, PUSH_PROMISE_FRAME_TYPE, flags, stream, o);
+            fill_stream_id(self.promised_stream_id, o);
+            o.put_exact(&self.field_block_fragment);
         }
     }
 }
 
-const PING_LENGTH: usize = 0x08;
+const PING_LENGTH: u32 = 0x08;
 
-///A builder which encodes info into PING frame.
-#[derive(CopyGetters, Setters)]
-pub struct PingEncoder {
-    #[getset(get_copy = "pub", set = "pub")]
+///Represents a PING frame.
+#[derive(CopyGetters, Debug, Setters)]
+#[getset(get_copy = "pub")]
+pub struct Ping {
+    stream_identifier: u32,
+    #[getset(set = "pub")]
     ack: bool,
-    #[getset(get_copy = "pub", set = "pub")]
+    #[getset(set = "pub")]
     opaque_data: u64,
 }
 
-impl std::fmt::Debug for PingEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PingEncoder")
-            .field("ack", &self.ack)
-            .field("opaque_data", &self.opaque_data)
-            .finish()
-    }
-}
-
-impl PingEncoder {
+impl Ping {
     ///Creates.
-    pub fn new() -> Self {
+    pub fn new(ack: bool, opaque_data: u64) -> Self {
         Self {
-            ack: false,
-            opaque_data: 0,
+            stream_identifier: STREAM_IDENTIFIER_ZERO,
+            ack,
+            opaque_data,
         }
     }
 
     #[inline(always)]
     fn flags(&self) -> u8 {
-        if self.ack {
-            ACK_FLAG
-        } else {
-            UNUSED_FLAGS
-        }
+        if self.ack { ACK_FLAG } else { UNUSED_FLAGS }
     }
 
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         let flags = self.flags();
-        fill_header(
-            PING_LENGTH as u32,
-            PING_FRAME_TYPE,
-            flags,
-            STREAM_IDENTIFIER_ZERO,
-            writer,
-        );
-        writer.put_u64(self.opaque_data)
+        let stream = self.stream_identifier;
+        fill_header(PING_LENGTH, PING_FRAME_TYPE, flags, stream, o);
+        u64_to(self.opaque_data, o);
     }
 }
 
-///A builder which encodes info into GOAWAY frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct GoawayEncoder {
-    #[getset(get_copy = "pub", set = "pub")]
+///Represents a GOAWAY frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+#[getset(get_copy = "pub", set = "pub")]
+pub struct Goaway {
     last_stream_id: u32,
-    #[getset(get_copy = "pub", set = "pub")]
     error_code: u32,
+    #[debug("{}", additional_debug_data.len())]
+    #[getset(skip)]
     #[getset(get = "pub", get_mut = "pub")]
-    additional_debug_data: Vec<u8>,
+    additional_debug_data: FiniteVec,
 }
 
-impl std::fmt::Debug for GoawayEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GoawayEncoder")
-            .field("last_stream_id", &self.last_stream_id)
-            .field("error_code", &self.error_code)
-            .field(
-                "additional_debug_data len",
-                &self.additional_debug_data.len(),
-            )
-            .finish()
-    }
-}
-
-impl GoawayEncoder {
-    ///Creates with capacity.
+impl Goaway {
+    ///Creates.
     pub fn new(capacity: usize) -> Self {
         Self {
             last_stream_id: 0,
             error_code: 0,
-            additional_debug_data: Vec::with_capacity(check_capacity(capacity)),
+            additional_debug_data: check_capacity(capacity).into(),
         }
     }
 
-    ///Creates with capacity 16,777,215.
-    pub fn max() -> Self {
-        Self::new(MAX_FRAME_LENGTH)
-    }
-
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        let n = MAX_FRAME_LENGTH - 8;
-        if self.additional_debug_data.len() > n {
-            Some(self.additional_debug_data.split_off(n))
-        } else {
-            None
-        }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
-        let length = length(8 + self.additional_debug_data.len());
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
+        let length = 8 + self.additional_debug_data.len() as u32;
         fill_header(
             length,
             GOAWAY_FRAME_TYPE,
             UNUSED_FLAGS,
             STREAM_IDENTIFIER_ZERO,
-            writer,
+            o,
         );
-        fill_stream_id(self.last_stream_id, writer);
-        writer.put_u32(self.error_code);
-        writer.put_all(&self.additional_debug_data)
+        fill_stream_id(self.last_stream_id, o);
+        u32_to(self.error_code, o);
+        o.put_exact(&self.additional_debug_data);
     }
 }
 
-const WINDOW_UPDATE_LENGTH: usize = 0x04;
+const WINDOW_UPDATE_LENGTH: u32 = 0x04;
 
-///A builder which encodes info into WINDOW_UPDATE frame.
-#[derive(CopyGetters, Setters)]
-pub struct WindowUpdateEncoder {
-    #[getset(get_copy = "pub")]
+///Represents a WINDOW_UPDATE frame.
+#[derive(CopyGetters, Debug, Setters)]
+#[getset(get_copy = "pub")]
+pub struct WindowUpdate {
     stream_identifier: u32,
-    #[getset(get_copy = "pub", set = "pub")]
+    #[getset(set = "pub")]
     window_size_increment: u32,
 }
 
-impl std::fmt::Debug for WindowUpdateEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WindowUpdateEncoder")
-            .field("stream_identifier", &self.stream_identifier)
-            .field("window_size_increment", &self.window_size_increment)
-            .finish()
-    }
-}
-
-impl WindowUpdateEncoder {
-    ///Creates with a stream identifier.
-    pub fn new(stream_identifier: u32) -> Self {
+impl WindowUpdate {
+    ///Creates.
+    pub fn new(stream_identifier: u32, window_size_increment: u32) -> Self {
         Self {
             stream_identifier,
-            window_size_increment: 0,
+            window_size_increment,
         }
     }
 
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         fill_header(
-            WINDOW_UPDATE_LENGTH as u32,
+            WINDOW_UPDATE_LENGTH,
             WINDOW_UPDATE_FRAME_TYPE,
             UNUSED_FLAGS,
             self.stream_identifier,
-            writer,
+            o,
         );
-        writer.put_u32(self.window_size_increment)
+        u32_to(self.window_size_increment, o);
     }
 }
 
-///A builder which encodes field block into CONTINUATION frame.
-#[derive(CopyGetters, Getters, MutGetters, Setters)]
-pub struct ContinuationEncoder {
+///Represents a CONTINUATION frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters, Setters)]
+pub struct Continuation {
     #[getset(get_copy = "pub")]
     stream_identifier: u32,
     #[getset(get_copy = "pub", set = "pub")]
     end_headers: bool,
+    #[debug("{}", field_block_fragment.len())]
     #[getset(get = "pub", get_mut = "pub")]
-    field_block_fragment: Vec<u8>,
+    field_block_fragment: FiniteVec,
 }
 
-impl std::fmt::Debug for ContinuationEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContinuationEncoder")
-            .field("stream_identifier", &self.stream_identifier)
-            .field("end_headers", &self.end_headers)
-            .field("field_block_fragment len", &self.field_block_fragment.len())
-            .finish()
-    }
-}
-
-impl ContinuationEncoder {
-    ///Creates with a stream identifier and capacity.
+impl Continuation {
+    ///Creates.
     pub fn new(stream_identifier: u32, capacity: usize) -> Self {
         Self {
             stream_identifier,
             end_headers: false,
-            field_block_fragment: Vec::with_capacity(check_capacity(capacity)),
+            field_block_fragment: check_capacity(capacity).into(),
         }
-    }
-
-    ///Creates with capacity 16,777,215.
-    pub fn max(stream_identifier: u32) -> Self {
-        Self::new(stream_identifier, MAX_FRAME_LENGTH)
     }
 
     #[inline(always)]
@@ -809,45 +583,19 @@ impl ContinuationEncoder {
         }
     }
 
-    ///Returns None if the data length <= 16,777,215, otherwise returns a newly vector containing bytes in the range [16777215..].
-    pub fn check_length(&mut self) -> Option<Vec<u8>> {
-        if self.field_block_fragment.len() > MAX_FRAME_LENGTH {
-            Some(self.field_block_fragment.split_off(MAX_FRAME_LENGTH))
-        } else {
-            None
-        }
-    }
-
-    ///Encodes self into sequential bytes, returning None if no error.
-    pub fn encode(self, writer: &mut impl WriteByte) -> Option<Error> {
+    ///Exports self into [`PutU8`].
+    pub fn export(self, o: &mut dyn PutU8) {
         let flags = self.flags();
-        let length = length(self.field_block_fragment.len());
-        fill_header(
-            length,
-            CONTINUATION_FRAME_TYPE,
-            flags,
-            self.stream_identifier,
-            writer,
-        );
-        writer.put_all(&self.field_block_fragment)
+        let length = self.field_block_fragment.len() as u32;
+        let stream = self.stream_identifier;
+        fill_header(length, CONTINUATION_FRAME_TYPE, flags, stream, o);
+        o.put_exact(&self.field_block_fragment);
     }
-}
-
-#[inline(always)]
-fn bit_eq(i: u8, f: u8) -> bool {
-    i & f == f
 }
 
 #[inline(always)]
 fn get_31_uint(o: &[u8]) -> u32 {
     u32::from_be_bytes([o[0] & RESERVED, o[1], o[2], o[3]])
-}
-
-#[inline(always)]
-fn get_header(o: &[u8]) -> (u32, u8, u8, u32) {
-    let length = u32::from_be_bytes([0, o[0], o[1], o[2]]);
-    let stream_identifier = get_31_uint(&o[5..9]);
-    (length, o[3], o[4], stream_identifier)
 }
 
 #[inline(always)]
@@ -858,177 +606,309 @@ fn get_priority(o: &[u8]) -> (bool, u32, u8) {
 }
 
 #[inline(always)]
-fn check_length(length: u32, v_len: usize, err: &mut HashSet<FrameError>) -> usize {
-    let f_len = length as usize + FRAME_HEADER_LENGTH;
-    if v_len == f_len {
-    } else if v_len < f_len {
-        err.insert(FrameError::LengthShortage);
-    } else {
-        err.insert(FrameError::LengthExcess);
+fn check_return<'a>(
+    o: bool,
+    s: &'a str,
+    h: &FrameHeader,
+) -> Result<(), (&'a str, Option<FrameHeader>)> {
+    if o { Err((s, Some(*h))) } else { Ok(()) }
+}
+
+///Represents a parsed frame header.
+#[derive(Clone, Copy, Debug, CopyGetters)]
+#[getset(get_copy = "pub")]
+pub struct FrameHeader {
+    length: u32,
+    ty: u8,
+    flags: u8,
+    stream_identifier: u32,
+}
+
+impl FrameHeader {
+    #[inline(always)]
+    fn padded_flag(&self) -> bool {
+        bit_eq(self.flags, PADDED_FLAG)
+    }
+
+    #[inline(always)]
+    fn end_stream_flag(&self) -> bool {
+        bit_eq(self.flags, END_STREAM_FLAG)
+    }
+
+    #[inline(always)]
+    fn priority_flag(&self) -> bool {
+        bit_eq(self.flags, PRIORITY_FLAG)
+    }
+
+    #[inline(always)]
+    fn end_headers_flag(&self) -> bool {
+        bit_eq(self.flags, END_HEADERS_FLAG)
+    }
+
+    #[inline(always)]
+    fn ack_flag(&self) -> bool {
+        bit_eq(self.flags, ACK_FLAG)
+    }
+}
+
+///Represents a result of parsing frame.
+#[derive(From)]
+#[repr(u8)]
+pub enum FrameResult {
+    Data(DataResult),
+    Headers(HeadersResult),
+    Priority(Priority),
+    RstStream(RstStream),
+    Settings(SettingsResult),
+    PushPromise(PushPromiseResult),
+    Ping(Ping),
+    Goaway(GoawayResult),
+    WindowUpdate(WindowUpdate),
+    Continuation(ContinuationResult),
+}
+
+///Parses bytes. Returns a frame, or error.
+pub fn get_frame(o: &mut dyn GetU8) -> Result<FrameResult, (&str, Option<FrameHeader>)> {
+    let h = o
+        .get_exact(FRAME_HEADER_LENGTH)
+        .ok_or_else(|| ("header shortage", None))?;
+    let h = FrameHeader {
+        length: u32::from_be_bytes([0, h[0], h[1], h[2]]),
+        ty: h[3],
+        flags: h[4],
+        stream_identifier: get_31_uint(&h[5..9]),
     };
-    f_len
-}
-
-///Frame error.
-#[derive(Debug, Eq, Hash, PartialEq)]
-pub enum FrameError {
-    InvalidFrameType,
-    LengthShortage,
-    LengthExcess,
-}
-
-///Frame decoder.
-pub enum FrameDecoder<'a> {
-    Data(DataDecoder<'a>),
-    Headers(HeadersDecoder<'a>),
-    Priority(PriorityDecoder<'a>),
-    RstStream(RstStreamDecoder<'a>),
-    Settings(SettingsDecoder<'a>),
-    PushPromise(PushPromiseDecoder<'a>),
-    Ping(PingDecoder<'a>),
-    Goaway(GoawayDecoder<'a>),
-    WindowUpdate(WindowUpdateDecoder<'a>),
-    Continuation(ContinuationDecoder<'a>),
-    Invalid(FrameError),
-}
-
-impl<'a> FrameDecoder<'a> {
-    ///Returns a decoder depend on the frame type, or error.
-    pub fn decode(buf: &'a [u8]) -> Self {
-        if buf.len() >= FRAME_HEADER_LENGTH {
-            match buf[3] {
-                DATA_FRAME_TYPE => Self::Data(DataDecoder::decode(buf)),
-                HEADERS_FRAME_TYPE => Self::Headers(HeadersDecoder::decode(buf)),
-                PRIORITY_FRAME_TYPE => {
-                    if buf.len() < FRAME_HEADER_LENGTH + PRIORITY_LENGTH {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::Priority(PriorityDecoder::decode(buf))
-                    }
-                }
-                RST_STREAM_FRAME_TYPE => {
-                    if buf.len() < FRAME_HEADER_LENGTH + RST_STREAM_LENGTH {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::RstStream(RstStreamDecoder::decode(buf))
-                    }
-                }
-                SETTINGS_FRAME_TYPE => Self::Settings(SettingsDecoder::decode(buf)),
-                PUSH_PROMISE_FRAME_TYPE => {
-                    if buf.len() < 13 {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::PushPromise(PushPromiseDecoder::decode(buf))
-                    }
-                }
-                PING_FRAME_TYPE => {
-                    if buf.len() < FRAME_HEADER_LENGTH + PING_LENGTH {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::Ping(PingDecoder::decode(buf))
-                    }
-                }
-                GOAWAY_FRAME_TYPE => {
-                    if buf.len() < 17 {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::Goaway(GoawayDecoder::decode(buf))
-                    }
-                }
-                WINDOW_UPDATE_FRAME_TYPE => {
-                    if buf.len() < FRAME_HEADER_LENGTH + WINDOW_UPDATE_LENGTH {
-                        Self::Invalid(FrameError::LengthShortage)
-                    } else {
-                        Self::WindowUpdate(WindowUpdateDecoder::decode(buf))
-                    }
-                }
-                CONTINUATION_FRAME_TYPE => Self::Continuation(ContinuationDecoder::decode(buf)),
-                _ => Self::Invalid(FrameError::InvalidFrameType),
+    let i = o.index();
+    let length = h.length;
+    let stream_identifier = h.stream_identifier;
+    let mut temp = TempIndex(i, i + length as usize);
+    let r = match h.ty {
+        DATA_FRAME_TYPE => {
+            let padded = h.padded_flag();
+            let mut pad_length = 0;
+            if padded {
+                check_return(length == 0, "invalid length", &h)?;
+                pad_length = o.get_u8().ok_or_else(|| ("shortage", Some(h)))?;
+                temp.0 += 1;
+                check_return(
+                    !temp.sub_pad_length(length, pad_length),
+                    "protocol error",
+                    &h,
+                )?;
             }
+            o.set_index(temp.1);
+            DataResult {
+                length,
+                stream_identifier,
+                padded,
+                end_stream: h.end_stream_flag(),
+                pad_length,
+                temp,
+            }
+            .into()
+        }
+        HEADERS_FRAME_TYPE => {
+            let padded = h.padded_flag();
+            let mut pad_length = 0;
+            if padded {
+                check_return(length == 0, "invalid length", &h)?;
+                pad_length = o.get_u8().ok_or_else(|| ("shortage", Some(h)))?;
+                temp.0 += 1;
+                check_return(
+                    !temp.sub_pad_length(length, pad_length),
+                    "protocol error",
+                    &h,
+                )?;
+            }
+            let priority = h.priority_flag();
+            let mut exclusive = false;
+            let mut stream_dependency = 0;
+            let mut weight = 0;
+            if priority {
+                check_return(length < 5, "invalid length", &h)?;
+                let i = o.get_exact(5).ok_or_else(|| ("shortage", Some(h)))?;
+                (exclusive, stream_dependency, weight) = get_priority(i);
+                temp.0 += 5;
+            }
+            o.set_index(temp.1);
+            HeadersResult {
+                length,
+                stream_identifier,
+                priority,
+                padded,
+                end_headers: h.end_headers_flag(),
+                end_stream: h.end_stream_flag(),
+                pad_length,
+                exclusive,
+                stream_dependency,
+                weight,
+                temp,
+            }
+            .into()
+        }
+        PRIORITY_FRAME_TYPE => {
+            check_return(length != PRIORITY_LENGTH, "invalid length", &h)?;
+            let i = o
+                .get_exact(PRIORITY_LENGTH as usize)
+                .ok_or_else(|| ("shortage", Some(h)))?;
+            let (exclusive, stream_dependency, weight) = get_priority(i);
+            Priority {
+                stream_identifier,
+                exclusive,
+                stream_dependency,
+                weight,
+            }
+            .into()
+        }
+        RST_STREAM_FRAME_TYPE => {
+            check_return(length != RST_STREAM_LENGTH, "invalid length", &h)?;
+            let error_code = to_u32(o).ok_or_else(|| ("shortage", Some(h)))?;
+            RstStream {
+                stream_identifier,
+                error_code,
+            }
+            .into()
+        }
+        SETTINGS_FRAME_TYPE => {
+            let mut setting = Vec::new();
+            if length > 0 {
+                let mut k = o
+                    .get_exact_to(length as usize)
+                    .ok_or_else(|| ("shortage", Some(h)))?;
+                while let Some(v) = k.get_exact(6) {
+                    let a = u16::from_be_bytes([v[0], v[1]]);
+                    let b = u32::from_be_bytes([v[2], v[3], v[4], v[5]]);
+                    setting.push((a, b));
+                }
+            }
+            o.set_index(temp.1);
+            SettingsResult {
+                length,
+                stream_identifier,
+                ack: h.ack_flag(),
+                setting,
+            }
+            .into()
+        }
+        PUSH_PROMISE_FRAME_TYPE => {
+            let padded = h.padded_flag();
+            let mut pad_length = 0;
+            if padded {
+                check_return(length == 0, "invalid length", &h)?;
+                pad_length = o.get_u8().ok_or_else(|| ("shortage", Some(h)))?;
+                temp.0 += 1;
+                check_return(
+                    !temp.sub_pad_length(length, pad_length),
+                    "protocol error",
+                    &h,
+                )?;
+            }
+            let i = o.get_exact(4).ok_or_else(|| ("shortage", Some(h)))?;
+            let promised_stream_id = get_31_uint(i);
+            temp.0 += 4;
+            o.set_index(temp.1);
+            PushPromiseResult {
+                length,
+                stream_identifier,
+                padded,
+                end_headers: h.end_headers_flag(),
+                pad_length,
+                promised_stream_id,
+                temp,
+            }
+            .into()
+        }
+        PING_FRAME_TYPE => {
+            check_return(length != PING_LENGTH, "invalid length", &h)?;
+            let opaque_data = to_u64(o).ok_or_else(|| ("shortage", Some(h)))?;
+            Ping {
+                stream_identifier,
+                ack: h.ack_flag(),
+                opaque_data,
+            }
+            .into()
+        }
+        GOAWAY_FRAME_TYPE => {
+            let i = o.get_exact(4).ok_or_else(|| ("shortage", Some(h)))?;
+            let last_stream_id = get_31_uint(i);
+            let error_code = to_u32(o).ok_or_else(|| ("shortage", Some(h)))?;
+            o.set_index(temp.1);
+            GoawayResult {
+                length,
+                stream_identifier,
+                last_stream_id,
+                error_code,
+                temp,
+            }
+            .into()
+        }
+        WINDOW_UPDATE_FRAME_TYPE => {
+            check_return(length != WINDOW_UPDATE_LENGTH, "invalid length", &h)?;
+            let i = o
+                .get_exact(WINDOW_UPDATE_LENGTH as usize)
+                .ok_or_else(|| ("shortage", Some(h)))?;
+            let window_size_increment = get_31_uint(i);
+            WindowUpdate {
+                stream_identifier,
+                window_size_increment,
+            }
+            .into()
+        }
+        CONTINUATION_FRAME_TYPE => {
+            o.set_index(temp.1);
+            ContinuationResult {
+                length,
+                stream_identifier,
+                end_headers: h.end_headers_flag(),
+                temp,
+            }
+            .into()
+        }
+        _ => return Err(("invalid type", Some(h))),
+    };
+    Ok(r)
+}
+
+struct TempIndex(usize, usize);
+
+impl TempIndex {
+    #[inline(always)]
+    fn sub_pad_length(&mut self, length: u32, pad_length: u8) -> bool {
+        let p = pad_length as u32;
+        if p < length {
+            self.1 -= p as usize;
+            true
         } else {
-            Self::Invalid(FrameError::LengthShortage)
+            false
         }
     }
 }
 
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
+///Represents a parsed DATA frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters)]
 #[getset(get_copy = "pub")]
-pub struct DataDecoder<'a> {
+pub struct DataResult {
     length: u32,
     stream_identifier: u32,
     padded: bool,
     end_stream: bool,
     pad_length: u8,
+    #[debug(ignore)]
     #[getset(skip)]
-    data: (usize, usize),
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    temp: TempIndex,
 }
 
-impl<'a> std::fmt::Debug for DataDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("DataDecoder");
-        o.field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("padded", &self.padded)
-            .field("end_stream", &self.end_stream);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        o.field("err", &self.err).finish()
-    }
-}
-
-impl<'a> DataDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        let f_len = check_length(length, v_len, &mut err);
-
-        let mut data = (FRAME_HEADER_LENGTH, f_len);
-        let padded = bit_eq(flags, PADDED_FLAG);
-        let mut pad_length = 0;
-        if padded {
-            data.0 += 1;
-            if v_len > 9 {
-                pad_length = v[9];
-                data.1 = f_len.saturating_sub(pad_length as usize);
-            } else {
-                err.insert(FrameError::LengthShortage);
-            }
-        }
-
-        Self {
-            length,
-            stream_identifier,
-            padded,
-            end_stream: bit_eq(flags, END_STREAM_FLAG),
-            pad_length,
-            data,
-            buffer: v,
-            err,
-        }
-    }
-
+impl DataResult {
     ///Returns data.
-    pub fn data(&self) -> Option<&[u8]> {
-        self.buffer.get(self.data.0..self.data.1)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
+    pub fn data<'a>(&self, o: &'a mut dyn GetU8) -> Option<Box<dyn GetU8 + 'a>> {
+        o.sub_to(self.temp.0, self.temp.1)
     }
 }
 
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
+///Represents a parsed HEADERS frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters)]
 #[getset(get_copy = "pub")]
-pub struct HeadersDecoder<'a> {
+pub struct HeadersResult {
     length: u32,
     stream_identifier: u32,
     priority: bool,
@@ -1039,627 +919,88 @@ pub struct HeadersDecoder<'a> {
     exclusive: bool,
     stream_dependency: u32,
     weight: u8,
+    #[debug(ignore)]
     #[getset(skip)]
-    field_block_fragment: (usize, usize),
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    temp: TempIndex,
 }
 
-impl<'a> std::fmt::Debug for HeadersDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("HeadersDecoder");
-        o.field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("priority", &self.priority)
-            .field("padded", &self.padded)
-            .field("end_headers", &self.end_headers)
-            .field("end_stream", &self.end_stream);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        if self.priority {
-            o.field("exclusive", &self.exclusive)
-                .field("stream_dependency", &self.stream_dependency)
-                .field("weight", &self.weight);
-        }
-        o.field("err", &self.err).finish()
-    }
-}
-
-impl<'a> HeadersDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        let f_len = check_length(length, v_len, &mut err);
-
-        let mut field_block_fragment = (FRAME_HEADER_LENGTH, f_len);
-        let padded = bit_eq(flags, PADDED_FLAG);
-        let mut pad_length = 0;
-        if padded {
-            field_block_fragment.0 += 1;
-            if v_len > 9 {
-                pad_length = v[9];
-                field_block_fragment.1 = f_len.saturating_sub(pad_length as usize);
-            } else {
-                err.insert(FrameError::LengthShortage);
-            }
-        }
-        let priority = bit_eq(flags, PRIORITY_FLAG);
-        let mut exclusive = false;
-        let mut stream_dependency = 0;
-        let mut weight = 0;
-        if priority {
-            field_block_fragment.0 += 5;
-            if padded {
-                if v_len > 14 {
-                    (exclusive, stream_dependency, weight) = get_priority(&v[10..15]);
-                } else {
-                    err.insert(FrameError::LengthShortage);
-                }
-            } else {
-                if v_len > 13 {
-                    (exclusive, stream_dependency, weight) = get_priority(&v[9..14]);
-                } else {
-                    err.insert(FrameError::LengthShortage);
-                }
-            }
-        }
-
-        Self {
-            length,
-            stream_identifier,
-            priority,
-            padded,
-            end_headers: bit_eq(flags, END_HEADERS_FLAG),
-            end_stream: bit_eq(flags, END_STREAM_FLAG),
-            pad_length,
-            exclusive,
-            stream_dependency,
-            weight,
-            field_block_fragment,
-            buffer: v,
-            err,
-        }
-    }
-
+impl HeadersResult {
     ///Returns field block fragment.
-    pub fn field_block_fragment(&self) -> Option<&[u8]> {
-        self.buffer
-            .get(self.field_block_fragment.0..self.field_block_fragment.1)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-
-    ///Decode field block fragment.
-    ///
-    ///You need an implementation of `DistributeInstructions`.
-    ///
-    ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
-        if let Some(mut o) = self.field_block_fragment() {
-            Instructions::decode(&mut o, ins)
-        }
+    pub fn field_block_fragment<'a>(&self, o: &'a mut dyn GetU8) -> Option<Box<dyn GetU8 + 'a>> {
+        o.sub_to(self.temp.0, self.temp.1)
     }
 }
 
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Setters)]
+///Represents a parsed SETTINGS frame.
+#[derive(CopyGetters, Debug, Getters)]
 #[getset(get_copy = "pub")]
-pub struct PriorityDecoder<'a> {
-    length: u32,
-    stream_identifier: u32,
-    exclusive: bool,
-    stream_dependency: u32,
-    weight: u8,
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
-}
-
-impl<'a> std::fmt::Debug for PriorityDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PriorityDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("exclusive", &self.exclusive)
-            .field("stream_dependency", &self.stream_dependency)
-            .field("weight", &self.weight)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> PriorityDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, _, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(PRIORITY_LENGTH as u32, v_len, &mut err);
-
-        let mut exclusive = false;
-        let mut stream_dependency = 0;
-        let mut weight = 0;
-        if v_len >= 14 {
-            (exclusive, stream_dependency, weight) = get_priority(&v[9..14]);
-        } else {
-            err.insert(FrameError::LengthShortage);
-        }
-
-        Self {
-            length,
-            stream_identifier,
-            exclusive,
-            stream_dependency,
-            weight,
-            buffer: v,
-            err,
-        }
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-}
-
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Setters)]
-#[getset(get_copy = "pub")]
-pub struct RstStreamDecoder<'a> {
-    length: u32,
-    stream_identifier: u32,
-    error_code: u32,
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
-}
-
-impl<'a> std::fmt::Debug for RstStreamDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RstStreamDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("error_code", &self.error_code)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> RstStreamDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, _, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(RST_STREAM_LENGTH as u32, v_len, &mut err);
-
-        let mut error_code = 0;
-        if v_len >= 13 {
-            error_code = u32::from_be_bytes([v[9], v[10], v[11], v[12]]);
-        } else {
-            err.insert(FrameError::LengthShortage);
-        }
-
-        Self {
-            length,
-            stream_identifier,
-            error_code,
-            buffer: v,
-            err,
-        }
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-}
-
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
-#[getset(get_copy = "pub")]
-pub struct SettingsDecoder<'a> {
+pub struct SettingsResult {
     length: u32,
     stream_identifier: u32,
     ack: bool,
-    buffer: &'a [u8],
     #[getset(skip)]
     #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    setting: Vec<(u16, u32)>,
 }
 
-impl<'a> std::fmt::Debug for SettingsDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SettingsDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("ack", &self.ack)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> SettingsDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(length, v_len, &mut err);
-
-        Self {
-            length,
-            stream_identifier,
-            ack: bit_eq(flags, ACK_FLAG),
-            buffer: v,
-            err,
-        }
-    }
-
-    ///Returns setting.
-    pub fn setting(&self) -> Option<&[u8]> {
-        self.buffer.get(FRAME_HEADER_LENGTH..)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-
-    ///Decode setting.
-    pub fn decode_setting(&self) -> Vec<(u16, u32)> {
-        let mut v = Vec::new();
-        if let Some(mut o) = self.setting() {
-            while let Some(a) = o.fetch_u16() {
-                if let Some(b) = o.fetch_u32() {
-                    v.push((a, b))
-                } else {
-                    break;
-                }
-            }
-        }
-        v
-    }
-}
-
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
+///Represents a parsed PUSH_PROMISE frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters)]
 #[getset(get_copy = "pub")]
-pub struct PushPromiseDecoder<'a> {
+pub struct PushPromiseResult {
     length: u32,
     stream_identifier: u32,
     padded: bool,
     end_headers: bool,
     pad_length: u8,
     promised_stream_id: u32,
+    #[debug(ignore)]
     #[getset(skip)]
-    field_block_fragment: (usize, usize),
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    temp: TempIndex,
 }
 
-impl<'a> std::fmt::Debug for PushPromiseDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut o = f.debug_struct("PushPromiseDecoder");
-        o.field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("padded", &self.padded)
-            .field("end_headers", &self.end_headers);
-        if self.padded {
-            o.field("pad_length", &self.pad_length);
-        }
-        o.field("promised_stream_id", &self.promised_stream_id)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> PushPromiseDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        let f_len = check_length(length, v_len, &mut err);
-
-        let mut field_block_fragment = (FRAME_HEADER_LENGTH, f_len);
-        let padded = bit_eq(flags, PADDED_FLAG);
-        let mut pad_length = 0;
-        let mut promised_stream_id = 0;
-        if padded {
-            field_block_fragment.0 += 1;
-            if v_len > 9 {
-                pad_length = v[9];
-                field_block_fragment.1 = f_len.saturating_sub(pad_length as usize);
-            } else if v_len >= 14 {
-                promised_stream_id = get_31_uint(&v[10..14]);
-            } else {
-                err.insert(FrameError::LengthShortage);
-            }
-        } else {
-            if v_len >= 13 {
-                promised_stream_id = get_31_uint(&v[9..13]);
-            } else {
-                err.insert(FrameError::LengthShortage);
-            }
-        }
-
-        Self {
-            length,
-            stream_identifier,
-            padded,
-            end_headers: bit_eq(flags, END_HEADERS_FLAG),
-            pad_length,
-            promised_stream_id,
-            field_block_fragment,
-            buffer: v,
-            err,
-        }
-    }
-
+impl PushPromiseResult {
     ///Returns field block fragment.
-    pub fn field_block_fragment(&self) -> Option<&[u8]> {
-        self.buffer
-            .get(self.field_block_fragment.0..self.field_block_fragment.1)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-
-    ///Decode field block fragment.
-    ///
-    ///You need an implementation of `DistributeInstructions`.
-    ///
-    ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
-        if let Some(mut o) = self.field_block_fragment() {
-            Instructions::decode(&mut o, ins)
-        }
+    pub fn field_block_fragment<'a>(&self, o: &'a mut dyn GetU8) -> Option<Box<dyn GetU8 + 'a>> {
+        o.sub_to(self.temp.0, self.temp.1)
     }
 }
 
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
+///Represents a parsed GOAWAY frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters)]
 #[getset(get_copy = "pub")]
-pub struct PingDecoder<'a> {
-    length: u32,
-    stream_identifier: u32,
-    ack: bool,
-    opaque_data: u64,
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
-}
-
-impl<'a> std::fmt::Debug for PingDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PingDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("ack", &self.ack)
-            .field("opaque_data", &self.opaque_data)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> PingDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(PING_LENGTH as u32, v_len, &mut err);
-
-        let opaque_data = if v_len >= 17 {
-            u64::from_be_bytes([v[9], v[10], v[11], v[12], v[13], v[14], v[15], v[16]])
-        } else {
-            0
-        };
-
-        Self {
-            length,
-            stream_identifier,
-            ack: bit_eq(flags, ACK_FLAG),
-            opaque_data,
-            buffer: v,
-            err,
-        }
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-}
-
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
-#[getset(get_copy = "pub")]
-pub struct GoawayDecoder<'a> {
+pub struct GoawayResult {
     length: u32,
     stream_identifier: u32,
     last_stream_id: u32,
     error_code: u32,
-    buffer: &'a [u8],
+    #[debug(ignore)]
     #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    temp: TempIndex,
 }
 
-impl<'a> std::fmt::Debug for GoawayDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GoawayDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("last_stream_id", &self.last_stream_id)
-            .field("error_code", &self.error_code)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> GoawayDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, _, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(length, v_len, &mut err);
-
-        let last_stream_id = if v_len >= 13 {
-            get_31_uint(&v[9..13])
-        } else {
-            err.insert(FrameError::LengthShortage);
-            0
-        };
-        let error_code = if v_len >= 17 {
-            u32::from_be_bytes([v[13], v[14], v[15], v[16]])
-        } else {
-            err.insert(FrameError::LengthShortage);
-            0
-        };
-
-        Self {
-            length,
-            stream_identifier,
-            last_stream_id,
-            error_code,
-            buffer: v,
-            err,
-        }
-    }
-
+impl GoawayResult {
     ///Returns additional debug data.
-    pub fn additional_debug_data(&self) -> Option<&[u8]> {
-        self.buffer.get(17..)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
+    pub fn additional_debug_data<'a>(&self, o: &'a mut dyn GetU8) -> Option<Box<dyn GetU8 + 'a>> {
+        o.sub_to(self.temp.0, self.temp.1)
     }
 }
 
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
+///Represents a parsed CONTINUATION frame.
+#[derive(CopyGetters, Debug, Getters, MutGetters)]
 #[getset(get_copy = "pub")]
-pub struct WindowUpdateDecoder<'a> {
-    length: u32,
-    stream_identifier: u32,
-    window_size_increment: u32,
-    buffer: &'a [u8],
-    #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
-}
-
-impl<'a> std::fmt::Debug for WindowUpdateDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WindowUpdateDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("window_size_increment", &self.window_size_increment)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> WindowUpdateDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, _, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(WINDOW_UPDATE_LENGTH as u32, v_len, &mut err);
-
-        let window_size_increment = if v_len >= 13 {
-            get_31_uint(&v[9..13])
-        } else {
-            0
-        };
-
-        Self {
-            length,
-            stream_identifier,
-            window_size_increment,
-            buffer: v,
-            err,
-        }
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-}
-
-///A builder which decodes sequential bytes into it.
-#[derive(CopyGetters, Getters)]
-#[getset(get_copy = "pub")]
-pub struct ContinuationDecoder<'a> {
+pub struct ContinuationResult {
     length: u32,
     stream_identifier: u32,
     end_headers: bool,
-    buffer: &'a [u8],
+    #[debug(ignore)]
     #[getset(skip)]
-    #[getset(get = "pub")]
-    err: HashSet<FrameError>,
+    temp: TempIndex,
 }
 
-impl<'a> std::fmt::Debug for ContinuationDecoder<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContinuationDecoder")
-            .field("length", &self.length)
-            .field("stream_identifier", &self.stream_identifier)
-            .field("end_headers", &self.end_headers)
-            .field("err", &self.err)
-            .finish()
-    }
-}
-
-impl<'a> ContinuationDecoder<'a> {
-    fn decode(v: &'a [u8]) -> Self {
-        let (length, _, flags, stream_identifier) = get_header(v);
-        let v_len = v.len();
-        let mut err = HashSet::new();
-        check_length(length, v_len, &mut err);
-
-        Self {
-            length,
-            stream_identifier,
-            end_headers: bit_eq(flags, END_HEADERS_FLAG),
-            buffer: v,
-            err,
-        }
-    }
-
+impl ContinuationResult {
     ///Returns field block fragment.
-    pub fn field_block_fragment(&self) -> Option<&[u8]> {
-        self.buffer.get(FRAME_HEADER_LENGTH..)
-    }
-
-    ///Returns true if the err is empty.
-    pub fn is_correct(&self) -> bool {
-        self.err.is_empty()
-    }
-
-    ///Decode field block fragment.
-    ///
-    ///You need an implementation of `DistributeInstructions`.
-    ///
-    ///If the END_HEADERS flag unset, the field block fragment is not a complete field section.
-    pub fn decode_fields(&self, ins: &mut impl DistributeInstructions) {
-        if let Some(mut o) = self.field_block_fragment() {
-            Instructions::decode(&mut o, ins)
-        }
+    pub fn field_block_fragment<'a>(&self, o: &'a mut dyn GetU8) -> Option<Box<dyn GetU8 + 'a>> {
+        o.sub_to(self.temp.0, self.temp.1)
     }
 }
 
@@ -1672,23 +1013,26 @@ mod tests {
         let i = 1;
         let a = 100;
         let b = 1000;
-        let mut o = DataEncoder::max(i);
+        let mut o = Data::new(i, 10000);
         o.set_end_stream(true);
         o.set_padded(true);
         o.set_pad_length(a);
-        o.data_mut().resize(b, 1);
-        let mut writer = Vec::new();
-        o.encode(&mut writer);
+        o.data_mut().put_repeat(b, 1);
+        let mut v = Vec::new();
+        o.export(&mut v);
 
-        match FrameDecoder::decode(&writer) {
-            FrameDecoder::Data(o) => {
-                assert_eq!(o.stream_identifier(), i);
-                assert_eq!(o.end_stream(), true);
-                assert_eq!(o.padded(), true);
-                assert_eq!(o.pad_length(), a);
-                assert_eq!(o.data().map(|i| i.len()).unwrap_or(0), b);
+        let mut v = v.into_get();
+        if let Ok(f) = get_frame(&mut v) {
+            match f {
+                FrameResult::Data(o) => {
+                    assert_eq!(o.stream_identifier(), i);
+                    assert_eq!(o.end_stream(), true);
+                    assert_eq!(o.padded(), true);
+                    assert_eq!(o.pad_length(), a);
+                    assert_eq!(o.data(&mut v).map(|r| r.surplus()).unwrap_or(0), b);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
