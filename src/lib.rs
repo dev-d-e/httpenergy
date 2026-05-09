@@ -4,27 +4,38 @@ Httpenergy is a crate for working with request and response format in HTTP/1.1, 
 This crate does not provide anything about connection.
 
 # Examples
+* HTTP/1.1 example
+
+There are two ways for parsing request bytes.
 ```
-use httpenergy::{H1Request, H1RequestUnits, H1RequestDecoder};
+use httpenergy::*;
 //Creates HTTP/1.1 request.
-let request = H1Request::with_method_target("GET", "/");
-let mut s = Vec::new();
-request.export(&mut s);
+let request = H1Request::new("GET", "/");
+let mut v = Vec::new();
+request.export(&mut v);
 
-//There are two ways for parsing request bytes.
-let units=H1RequestUnits::new(&s);
-let mut r =H1Request::new();
-units.copy_to_request(&mut r);
-println!("H1RequestUnits: {:?}", r.method());
+//Parses bytes into request.
+let mut g = v.into_get();
+let units = H1RequestUnits::new(&mut g);
+let mut r = H1Request::default();
+units.copy_to_request(&mut g, &mut r);
+assert_eq!("GET", r.method());
+```
+```
+use httpenergy::*;
+//Creates HTTP/1.1 request.
+let request = H1Request::new("GET", "/");
+let mut v = Vec::new();
+request.export(&mut v);
 
-let decoder = H1RequestDecoder::new(s);
-let r2 =decoder.to_request();
-println!("H1RequestDecoder: {:?}", r2.method());
+//Parses bytes into request.
+let r = H1RequestParser::new(v).to_request();
+assert_eq!("GET", r.method());
 ```
 
-[HTTP/2 example](h2/index.html)
+* [HTTP/2 example](h2/index.html)
 
-[HTTP/3 example](h3/index.html)
+* [HTTP/3 example](h3/index.html)
 */
 
 #![allow(dead_code)]
@@ -48,46 +59,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request() {
-        let mut r = H1Request::with_method_target("GET", "/");
-        r.headers_mut().add_field(
-            "Accept".to_string(),
-            Vec::from("text/*, text/plain, text/plain;format=flowed, */*"),
+    fn h1_request() {
+        let mut r = H1Request::new("GET", "/");
+        r.add_field(
+            "Accept",
+            "text/*, text/plain, text/plain;format=flowed, */*",
         );
-        r.headers_mut()
-            .add_field("Host".to_string(), Vec::from("www "));
+        r.add_field("Host", "www ");
 
-        let mut s = Vec::new();
-        r.export(&mut s);
+        let mut v = Vec::new();
+        r.export(&mut v);
 
-        let mut u = H1RequestUnits::new(&s);
-        println!("Accept: {:?}", u.header_value_string("Accept"));
-        s.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaa");
-        u.set_slice(&s);
-        println!("Host: {:?}", u.header_value_string("Host"));
+        let mut g = v.into_get();
+        let mut o = H1RequestUnits::new(&mut g);
+        println!("Accept: {:?}", o.header_value_string("Accept", &mut g));
+        g.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaa");
+        println!("Host: {:?}", o.header_value_string("Host", &mut g));
 
-        let d = H1RequestDecoder::new(s);
-        let rst = d.to_request();
+        let s = g.take();
+        println!("s: {:?}", str::from_utf8(&s).unwrap_or(""));
+        let o = H1RequestParser::new(s);
+        let rst = o.to_request();
         println!("{:?}", rst);
         assert_eq!("GET", rst.method());
     }
 
     #[test]
-    fn test_response() {
-        let mut r = H1Response::with_status_code("200");
-        r.headers_mut().add_field(
-            "Accept".to_string(),
-            Vec::from("text/*, text/plain, text/plain;format=flowed, */*"),
+    fn h1_response() {
+        let mut r = H1Response::new("200");
+        r.add_field(
+            "Accept",
+            "text/*, text/plain, text/plain;format=flowed, */*",
         );
 
         let mut s = Vec::new();
         r.export(&mut s);
 
-        let mut u = H1ResponseUnits::new(&s);
-        println!("Accept: {:?}", u.header_value_string("Accept"));
+        let mut g = s.into_get();
+        let mut o = H1ResponseUnits::new(&mut g);
+        println!("Accept: {:?}", o.header_value_string("Accept", &mut g));
 
-        let d = H1ResponseDecoder::new(s);
-        let rst = d.to_response();
+        let s = g.take();
+        let o = H1ResponseParser::new(s);
+        let rst = o.to_response();
         println!("{:?}", rst);
         assert_eq!("200", rst.status_code());
     }
