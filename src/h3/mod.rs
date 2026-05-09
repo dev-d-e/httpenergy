@@ -13,92 +13,68 @@ pub mod frame;
 mod prty;
 pub mod qpack;
 
-use crate::h2::hpack::IndexResult;
-use crate::Entity;
+use crate::io::*;
+use crate::prty::*;
 pub use assist::*;
-use getset::{Getters, MutGetters};
-use std::ops::{Deref, DerefMut};
+use derive_more::{Debug, Deref, DerefMut};
 
 ///The ":method" pseudo-header field.
-pub const PSEUDO_METHOD: &str = ":method";
+pub const PSEUDO_METHOD: &[u8] = b":method";
 ///The ":scheme" pseudo-header field.
-pub const PSEUDO_SCHEME: &str = ":scheme";
+pub const PSEUDO_SCHEME: &[u8] = b":scheme";
 ///The ":authority" pseudo-header field.
-pub const PSEUDO_AUTHORITY: &str = ":authority";
+pub const PSEUDO_AUTHORITY: &[u8] = b":authority";
 ///The ":path" pseudo-header field.
-pub const PSEUDO_PATH: &str = ":path";
+pub const PSEUDO_PATH: &[u8] = b":path";
 ///The ":status" pseudo-header field.
-pub const PSEUDO_STATUS: &str = ":status";
+pub const PSEUDO_STATUS: &[u8] = b":status";
 
 ///Represents an HTTP/3 request.
-#[derive(Getters, MutGetters)]
+#[derive(Debug, Default, Deref, DerefMut, Getters, MutGetters)]
 pub struct H3Request {
     #[getset(get = "pub", get_mut = "pub")]
-    method: String,
+    method: FieldValue,
     #[getset(get = "pub", get_mut = "pub")]
-    scheme: Option<String>,
+    scheme: Option<FieldValue>,
     #[getset(get = "pub", get_mut = "pub")]
-    authority: Option<String>,
+    authority: Option<FieldValue>,
     #[getset(get = "pub", get_mut = "pub")]
-    path: Option<String>,
+    path: Option<FieldValue>,
+    #[deref]
+    #[deref_mut]
     headers_body: Entity,
-}
-
-impl Deref for H3Request {
-    type Target = Entity;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.headers_body
-    }
-}
-
-impl DerefMut for H3Request {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.headers_body
-    }
-}
-
-impl std::fmt::Debug for H3Request {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3Request")
-            .field("method", &self.method)
-            .field("scheme", &self.scheme)
-            .field("authority", &self.authority)
-            .field("path", &self.path)
-            .field("headers", self.headers_body.headers())
-            .field("body len", &self.headers_body.body().len())
-            .field("err", &self.headers_body.err())
-            .finish()
-    }
 }
 
 impl H3Request {
     ///Creates.
-    pub fn new() -> Self {
+    pub fn new(method: impl Into<FieldValue>) -> Self {
         Self {
-            method: String::new(),
+            method: method.into(),
             scheme: None,
             authority: None,
             path: None,
-            headers_body: Entity::new(),
+            headers_body: Default::default(),
         }
     }
 
-    ///Creates.
-    pub fn with_method(method: &str) -> Self {
-        Self {
-            method: method.to_string(),
-            scheme: None,
-            authority: None,
-            path: None,
-            headers_body: Entity::new(),
-        }
+    ///Sets scheme.
+    pub fn set_scheme(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.scheme = value.map(|o| o.into());
+    }
+
+    ///Sets authority.
+    pub fn set_authority(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.authority = value.map(|o| o.into());
+    }
+
+    ///Sets path.
+    pub fn set_path(&mut self, value: Option<impl Into<FieldValue>>) {
+        self.path = value.map(|o| o.into());
     }
 
     ///Sets a pseudo-header field.
-    pub fn set_pseudo(&mut self, name: &str, value: String) {
+    pub fn set_pseudo(&mut self, name: &[u8], value: impl Into<FieldValue>) {
+        let value = value.into();
         match name {
             PSEUDO_METHOD => {
                 self.method = value;
@@ -117,121 +93,107 @@ impl H3Request {
     }
 
     ///Returns a static table index value of ":method".
-    pub fn indexed_method(&self) -> IndexResult<'_> {
-        match self.method.as_str() {
-            "CONNECT" => IndexResult::Both(15),
-            "DELETE" => IndexResult::Both(16),
-            "GET" => IndexResult::Both(17),
-            "HEAD" => IndexResult::Both(18),
-            "OPTIONS" => IndexResult::Both(19),
-            "POST" => IndexResult::Both(20),
-            "PUT" => IndexResult::Both(21),
-            _ => IndexResult::One(15, self.method.as_bytes()),
+    pub fn indexed_method(&self) -> IndexRef<'_> {
+        let o = self.method.as_bytes();
+        match o {
+            b"CONNECT" => IndexRef::StaticBoth(15),
+            b"DELETE" => IndexRef::StaticBoth(16),
+            b"GET" => IndexRef::StaticBoth(17),
+            b"HEAD" => IndexRef::StaticBoth(18),
+            b"OPTIONS" => IndexRef::StaticBoth(19),
+            b"POST" => IndexRef::StaticBoth(20),
+            b"PUT" => IndexRef::StaticBoth(21),
+            _ => IndexRef::StaticOne(15, o),
         }
     }
 
-    ///Returns a static table index value of ":scheme" or None if scheme is None.
-    pub fn indexed_scheme(&self) -> IndexResult<'_> {
-        if let Some(scheme) = &self.scheme {
-            match scheme.as_str() {
-                "http" => IndexResult::Both(22),
-                "https" => IndexResult::Both(23),
-                _ => IndexResult::One(22, scheme.as_bytes()),
+    ///Returns a static table index value of ":scheme" or None.
+    pub fn indexed_scheme(&self) -> Option<IndexRef<'_>> {
+        self.scheme.as_ref().map(|scheme| {
+            let o = scheme.as_bytes();
+            match o {
+                b"http" => IndexRef::StaticBoth(22),
+                b"https" => IndexRef::StaticBoth(23),
+                _ => IndexRef::StaticOne(22, o),
             }
-        } else {
-            IndexResult::None
-        }
+        })
     }
 
-    ///Returns a static table index value of ":authority" or None if authority is None.
-    pub fn indexed_authority(&self) -> IndexResult<'_> {
-        if let Some(authority) = &self.authority {
+    ///Returns a static table index value of ":authority" or None.
+    pub fn indexed_authority(&self) -> Option<IndexRef<'_>> {
+        self.authority.as_ref().map(|authority| {
             if authority.is_empty() {
-                IndexResult::Both(0)
+                IndexRef::StaticBoth(0)
             } else {
-                IndexResult::One(0, authority.as_bytes())
+                IndexRef::StaticOne(0, authority.as_bytes())
             }
-        } else {
-            IndexResult::None
-        }
+        })
     }
 
-    ///Returns a static table index value of ":path" or None if path is None.
-    pub fn indexed_path(&self) -> IndexResult<'_> {
-        if let Some(path) = &self.path {
-            match path.as_str() {
-                "/" => IndexResult::Both(1),
-                _ => IndexResult::One(1, path.as_bytes()),
+    ///Returns a static table index value of ":path" or None.
+    pub fn indexed_path(&self) -> Option<IndexRef<'_>> {
+        self.path.as_ref().map(|path| {
+            let o = path.as_bytes();
+            match o {
+                b"/" => IndexRef::StaticBoth(1),
+                _ => IndexRef::StaticOne(1, o),
             }
-        } else {
-            IndexResult::None
-        }
+        })
     }
 }
 
 ///Represents an HTTP/3 response.
-#[derive(Getters, MutGetters)]
+#[derive(Debug, Default, Deref, DerefMut, Getters, MutGetters)]
 pub struct H3Response {
     #[getset(get = "pub", get_mut = "pub")]
-    status: String,
+    status: FieldValue,
+    #[deref]
+    #[deref_mut]
     headers_body: Entity,
-}
-
-impl Deref for H3Response {
-    type Target = Entity;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.headers_body
-    }
-}
-
-impl DerefMut for H3Response {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.headers_body
-    }
-}
-
-impl std::fmt::Debug for H3Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3Response")
-            .field("status", &self.status)
-            .field("headers", self.headers_body.headers())
-            .field("body len", &self.headers_body.body().len())
-            .field("err", &self.headers_body.err())
-            .finish()
-    }
 }
 
 impl H3Response {
     ///Creates.
-    pub fn new(status: &str) -> Self {
+    pub fn new(status: impl Into<FieldValue>) -> Self {
         Self {
-            status: status.to_string(),
-            headers_body: Entity::new(),
+            status: status.into(),
+            headers_body: Default::default(),
         }
     }
 
     ///Sets a pseudo-header field.
-    pub fn set_pseudo(&mut self, name: &str, value: String) {
+    pub fn set_pseudo(&mut self, name: &[u8], value: impl Into<FieldValue>) {
         match name {
             PSEUDO_STATUS => {
-                self.status = value;
+                self.status = value.into();
             }
             _ => {}
         }
     }
 
     ///Returns a static table index value of ":status".
-    pub fn indexed_status(&self) -> IndexResult<'_> {
-        match self.status.as_str() {
-            "103" => IndexResult::Both(24),
-            "200" => IndexResult::Both(25),
-            "304" => IndexResult::Both(26),
-            "404" => IndexResult::Both(27),
-            "503" => IndexResult::Both(28),
-            _ => IndexResult::One(24, self.status.as_bytes()),
+    pub fn indexed_status(&self) -> IndexRef<'_> {
+        let o = self.status.as_bytes();
+        match o {
+            b"103" => IndexRef::StaticBoth(24),
+            b"200" => IndexRef::StaticBoth(25),
+            b"304" => IndexRef::StaticBoth(26),
+            b"404" => IndexRef::StaticBoth(27),
+            b"503" => IndexRef::StaticBoth(28),
+            _ => IndexRef::StaticOne(24, o),
         }
     }
+}
+
+///Represents reference to an existing table entry.
+#[repr(u8)]
+pub enum IndexRef<'a> {
+    ///Identifies an entry(name-value pair) in the static table.
+    StaticBoth(usize),
+    ///Identifies a name in the static table.
+    StaticOne(usize, &'a [u8]),
+    ///Identifies an entry(name-value pair) in the dynamic table.
+    DynamicBoth(usize),
+    ///Identifies a name in the dynamic table.
+    DynamicOne(usize, &'a [u8]),
 }
