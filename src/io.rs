@@ -1,280 +1,395 @@
-use std::io::Error;
+use derive_more::{Debug, Deref, DerefMut};
+use std::num::NonZeroUsize;
 
-///A trait for reading bytes from a source.
-pub trait ReadByte {
+pub(crate) const READ_BYTE_ERROR: &str = "read byte error";
+
+///A trait for reading bytes.
+pub trait GetU8 {
     ///Returns the number of bytes between the current position and the end.
     fn surplus(&self) -> usize;
 
-    ///Advance the internal cursor.
-    fn advance(&mut self, n: usize);
+    ///Returns the internal index.
+    fn index(&mut self) -> usize;
 
-    ///Gets an unsigned 8 bit integer from self.
-    fn fetch(&mut self) -> Option<u8>;
+    ///Sets the internal index.
+    fn set_index(&mut self, n: usize);
 
-    ///Gets at most n bytes from self.
-    fn fetch_all(&mut self, n: usize) -> Option<&[u8]>;
+    ///Returns an unsigned 8 bit integer.
+    fn get_u8(&mut self) -> Option<u8>;
 
-    ///Gets some bytes from self.
-    #[inline]
-    fn fetch_some(&mut self) -> Option<&[u8]> {
-        let n = self.surplus();
-        self.fetch_all(n)
-    }
+    ///Returns n bytes.
+    fn get_exact(&mut self, n: usize) -> Option<&[u8]>;
 
-    ///Gets an unsigned 16 bit integer from self in big-endian byte order.
-    #[inline]
-    fn fetch_u16(&mut self) -> Option<u16> {
-        if let Some(v) = self.fetch_all(2) {
-            if v.len() == 2 {
-                return Some(u16::from_be_bytes([v[0], v[1]]));
-            }
-        }
-        None
-    }
+    ///Returns n bytes.
+    fn get_exact_to<'a>(&'a mut self, n: usize) -> Option<Box<dyn GetU8 + 'a>>;
 
-    ///Gets an unsigned 32 bit integer from self in the big-endian byte order.
-    #[inline]
-    fn fetch_u32(&mut self) -> Option<u32> {
-        if let Some(v) = self.fetch_all(4) {
-            if v.len() == 4 {
-                return Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
-            }
-        }
-        None
-    }
+    ///Splits n bytes.
+    fn split_exact(&mut self, n: usize) -> Option<Vec<u8>>;
 
-    ///Gets an unsigned 64 bit integer from self in big-endian byte order.
-    #[inline]
-    fn fetch_u64(&mut self) -> Option<u64> {
-        if let Some(v) = self.fetch_all(8) {
-            if v.len() == 8 {
-                return Some(u64::from_be_bytes([
-                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
-                ]));
-            }
-        }
-        None
-    }
+    ///Returns surplus bytes.
+    fn get_surplus<'a>(&'a mut self) -> &'a [u8];
 
-    ///Gets an unsigned 128 bit integer from self in big-endian byte order.
-    #[inline]
-    fn fetch_u128(&mut self) -> Option<u128> {
-        if let Some(v) = self.fetch_all(16) {
-            if v.len() == 8 {
-                return Some(u128::from_be_bytes([
-                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11],
-                    v[12], v[13], v[14], v[15],
-                ]));
-            }
-        }
-        None
-    }
+    ///Returns a sub `GetU8`, or None if out of bounds.
+    fn sub_to<'a>(&'a self, a: usize, b: usize) -> Option<Box<dyn GetU8 + 'a>>;
 
     ///Returns true if there are any more bytes to read.
     #[inline]
-    fn has_surplus(&self) -> bool {
+    fn is_surplus(&self) -> bool {
         self.surplus() > 0
     }
 }
 
-impl ReadByte for &[u8] {
+///A `GetU8` over the bytes of a slice.
+#[derive(Debug, Deref)]
+pub struct SliceGet<'a> {
+    #[debug("{}", o.len())]
+    #[deref]
+    o: &'a [u8],
+    i: usize,
+}
+
+impl<'a> From<&'a [u8]> for SliceGet<'a> {
+    fn from(o: &'a [u8]) -> Self {
+        Self { o, i: 0 }
+    }
+}
+
+impl<'a> GetU8 for SliceGet<'a> {
     #[inline]
     fn surplus(&self) -> usize {
-        self.len()
+        self.o.len().saturating_sub(self.i)
     }
 
     #[inline]
-    fn advance(&mut self, n: usize) {
-        if n < self.len() {
-            *self = &self[n..];
+    fn index(&mut self) -> usize {
+        self.i
+    }
+
+    #[inline]
+    fn set_index(&mut self, n: usize) {
+        self.i = n;
+    }
+
+    #[inline]
+    fn get_u8(&mut self) -> Option<u8> {
+        let a = self.i;
+        if a < self.o.len() {
+            self.i += 1;
+            self.o.get(a).copied()
         } else {
-            *self = &[];
+            None
         }
     }
 
     #[inline]
-    fn fetch(&mut self) -> Option<u8> {
-        if self.len() > 0 {
-            let r = self[0];
-            self.advance(1);
-            Some(r)
+    fn get_exact(&mut self, n: usize) -> Option<&'a [u8]> {
+        let a = self.i;
+        let b = a + n;
+        if b <= self.o.len() {
+            self.i = b;
+            self.o.get(a..b)
         } else {
             None
         }
     }
 
     #[inline]
-    fn fetch_all(&mut self, n: usize) -> Option<&[u8]> {
-        if n <= self.len() {
-            let r = &self[..n];
-            self.advance(n);
-            Some(r)
+    fn get_exact_to(&mut self, n: usize) -> Option<Box<dyn GetU8 + 'a>> {
+        let a = self.i;
+        let b = a + n;
+        if b <= self.o.len() {
+            self.i = b;
+            self.o
+                .get(a..b)
+                .map(|o| Box::new(o.into_get()) as Box<dyn GetU8>)
         } else {
             None
         }
     }
+
+    #[inline]
+    fn split_exact(&mut self, n: usize) -> Option<Vec<u8>> {
+        self.get_exact(n).map(|o| o.to_vec())
+    }
+
+    #[inline]
+    fn get_surplus(&mut self) -> &[u8] {
+        let a = self.i;
+        self.i = self.o.len();
+        self.o.get(a..).unwrap_or_else(|| &[])
+    }
+
+    #[inline]
+    fn sub_to(&self, a: usize, b: usize) -> Option<Box<dyn GetU8 + 'a>> {
+        self.o
+            .get(a..b)
+            .map(|o| Box::new(o.into_get()) as Box<dyn GetU8>)
+    }
 }
 
-///A trait for writing bytes to a buffer.
-pub trait WriteByte {
-    ///Returns the number of bytes that can be written from the current position until the end.
-    fn surplus_mut(&self) -> usize;
+///A `GetU8` over the bytes of a vector.
+#[derive(Debug, Deref, DerefMut)]
+pub struct VecGet {
+    #[debug("{}", o.len())]
+    #[deref]
+    #[deref_mut]
+    o: Vec<u8>,
+    i: usize,
+}
 
-    ///Writes an unsigned 8 bit integer to self.
-    fn put(&mut self, o: u8) -> Option<Error>;
+impl<T: Into<Vec<u8>>> From<T> for VecGet {
+    fn from(o: T) -> Self {
+        Self { o: o.into(), i: 0 }
+    }
+}
 
-    ///Writes repetitive cnt bytes an unsigned 8 bit integer to self.
-    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error>;
+impl VecGet {
+    pub fn take(self) -> Vec<u8> {
+        self.o
+    }
+}
 
-    ///Writes a buffer to self.
-    ///self must have enough surplus to contain all bytes.
-    fn put_all(&mut self, buf: &[u8]) -> Option<Error>;
-
-    ///Writes a buffer to self, returning the bytes which were not written.
+impl GetU8 for VecGet {
     #[inline]
-    fn put_some(&mut self, buf: &[u8]) -> Result<Option<&[u8]>, Error> {
-        if let Some(e) = self.put_all(buf) {
-            Err(e)
+    fn surplus(&self) -> usize {
+        self.o.len().saturating_sub(self.i)
+    }
+
+    #[inline]
+    fn index(&mut self) -> usize {
+        self.i
+    }
+
+    #[inline]
+    fn set_index(&mut self, n: usize) {
+        self.i = n;
+    }
+
+    #[inline]
+    fn get_u8(&mut self) -> Option<u8> {
+        let a = self.i;
+        if a < self.o.len() {
+            self.i += 1;
+            self.o.get(a).copied()
         } else {
-            Ok(None)
+            None
         }
     }
 
-    ///Writes an unsigned 16 bit integer to self in big-endian byte order.
     #[inline]
-    fn put_u16(&mut self, o: u16) -> Option<Error> {
-        self.put_all(&o.to_be_bytes())
+    fn get_exact(&mut self, n: usize) -> Option<&[u8]> {
+        let a = self.i;
+        let b = a + n;
+        if b <= self.o.len() {
+            self.i = b;
+            self.o.get(a..b)
+        } else {
+            None
+        }
     }
 
-    ///Writes an unsigned 32 bit integer to self in big-endian byte order.
     #[inline]
-    fn put_u32(&mut self, o: u32) -> Option<Error> {
-        self.put_all(&o.to_be_bytes())
+    fn get_exact_to<'a>(&'a mut self, n: usize) -> Option<Box<dyn GetU8 + 'a>> {
+        let a = self.i;
+        let b = a + n;
+        if b <= self.o.len() {
+            self.i = b;
+            self.o
+                .get(a..b)
+                .map(|o| Box::new(o.into_get()) as Box<dyn GetU8>)
+        } else {
+            None
+        }
     }
 
-    ///Writes an unsigned 64 bit integer to self in the big-endian byte order.
     #[inline]
-    fn put_u64(&mut self, o: u64) -> Option<Error> {
-        self.put_all(&o.to_be_bytes())
+    fn split_exact(&mut self, n: usize) -> Option<Vec<u8>> {
+        let a = self.i;
+        let b = a + n;
+        if b <= self.o.len() {
+            let mut r = self.o.split_off(a);
+            self.o = r.split_off(n);
+            self.i = 0;
+            return Some(r);
+        }
+        None
     }
 
-    ///Writes an unsigned 128 bit integer to self in the big-endian byte order.
     #[inline]
-    fn put_u128(&mut self, o: u128) -> Option<Error> {
-        self.put_all(&o.to_be_bytes())
+    fn get_surplus(&mut self) -> &[u8] {
+        let a = self.i;
+        self.i = self.o.len();
+        self.o.get(a..).unwrap_or_else(|| &[])
     }
 
-    ///Returns true if there is space in self for more bytes.
     #[inline]
-    fn has_surplus_mut(&self) -> bool {
-        self.surplus_mut() > 0
+    fn sub_to<'a>(&'a self, a: usize, b: usize) -> Option<Box<dyn GetU8 + 'a>> {
+        self.o
+            .get(a..b)
+            .map(|o| Box::new(o.into_get()) as Box<dyn GetU8>)
     }
 }
 
-impl WriteByte for Vec<u8> {
+impl PutU8 for VecGet {
     #[inline]
-    fn surplus_mut(&self) -> usize {
+    fn blank(&self) -> usize {
         isize::MAX as usize - self.len()
     }
 
     #[inline]
-    fn put(&mut self, o: u8) -> Option<Error> {
+    fn put_u8(&mut self, o: u8) -> bool {
         self.push(o);
-        None
-    }
-
-    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error> {
-        self.resize(self.len() + cnt, o);
-        None
+        true
     }
 
     #[inline]
-    fn put_some(&mut self, buf: &[u8]) -> Result<Option<&[u8]>, Error> {
-        self.extend_from_slice(buf);
-        Ok(None)
+    fn put_repeat(&mut self, n: usize, o: u8) -> bool {
+        self.o.resize(self.o.len() + n, o);
+        true
     }
 
     #[inline]
-    fn put_all(&mut self, buf: &[u8]) -> Option<Error> {
-        self.extend_from_slice(buf);
-        None
+    fn put_exact(&mut self, o: &[u8]) -> bool {
+        self.extend_from_slice(o);
+        true
     }
 }
 
-///Wraps a WriteByte and buffers its output.
-pub struct BufWriteByte<T>
-where
-    T: WriteByte,
-{
-    buf: Vec<u8>,
-    buf_size: usize,
-    inner: T,
+///A trait for conversion into [`GetU8`].
+pub trait IntoGetU8 {
+    type Item: GetU8;
+
+    fn into_get(self) -> Self::Item;
 }
 
-impl<T> BufWriteByte<T>
-where
-    T: WriteByte,
-{
-    ///Creates a new Self with the specified buffer capacity.
-    pub fn new(inner: T, buf_size: usize) -> Self {
+impl<'a> IntoGetU8 for &'a [u8] {
+    type Item = SliceGet<'a>;
+
+    fn into_get(self) -> Self::Item {
+        self.into()
+    }
+}
+
+impl IntoGetU8 for Vec<u8> {
+    type Item = VecGet;
+
+    fn into_get(self) -> Self::Item {
+        self.into()
+    }
+}
+
+///A trait for writing bytes.
+pub trait PutU8 {
+    ///Returns the number of bytes that can be written.
+    fn blank(&self) -> usize;
+
+    ///Returns true if there is space in self for more bytes.
+    #[inline]
+    fn is_blank(&self) -> bool {
+        self.blank() > 0
+    }
+
+    ///Writes an unsigned 8 bit integer.
+    fn put_u8(&mut self, o: u8) -> bool;
+
+    ///Writes bytes, self must have enough blank to contain all bytes.
+    fn put_exact(&mut self, o: &[u8]) -> bool;
+
+    ///Writes repetitive n bytes.
+    fn put_repeat(&mut self, n: usize, o: u8) -> bool;
+}
+
+impl PutU8 for Vec<u8> {
+    #[inline]
+    fn blank(&self) -> usize {
+        isize::MAX as usize - self.len()
+    }
+
+    #[inline]
+    fn put_u8(&mut self, o: u8) -> bool {
+        self.push(o);
+        true
+    }
+    #[inline]
+    fn put_exact(&mut self, o: &[u8]) -> bool {
+        self.extend_from_slice(o);
+        true
+    }
+
+    #[inline]
+    fn put_repeat(&mut self, n: usize, o: u8) -> bool {
+        self.resize(self.len() + n, o);
+        true
+    }
+}
+
+///A vector with a fixed capacity.
+#[derive(Debug, Deref)]
+pub struct FiniteVec {
+    capacity: NonZeroUsize,
+    #[debug("{}", inner.len())]
+    #[deref]
+    inner: Vec<u8>,
+}
+impl FiniteVec {
+    ///Returns capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity.get()
+    }
+}
+
+impl From<NonZeroUsize> for FiniteVec {
+    ///Creates a new vector with capacity.
+    fn from(capacity: NonZeroUsize) -> Self {
         Self {
-            buf: Vec::with_capacity(buf_size),
-            buf_size,
-            inner,
+            capacity,
+            inner: Vec::with_capacity(capacity.get()),
         }
-    }
-
-    ///Creates a new Self with a default buffer capacity. The default is currently 4096.
-    pub fn with_buffer(inner: T) -> Self {
-        Self::new(inner, 4096)
-    }
-
-    #[inline]
-    fn put_check(&mut self) -> Option<Error> {
-        if self.buf.len() >= self.buf_size {
-            self.inner.put_all(&self.buf)?;
-            self.buf.clear();
-        }
-        None
     }
 }
 
-impl<T> WriteByte for BufWriteByte<T>
-where
-    T: WriteByte,
-{
+impl From<(NonZeroUsize, Vec<u8>)> for FiniteVec {
+    fn from(o: (NonZeroUsize, Vec<u8>)) -> Self {
+        Self {
+            capacity: o.0,
+            inner: o.1,
+        }
+    }
+}
+
+impl PutU8 for FiniteVec {
     #[inline]
-    fn surplus_mut(&self) -> usize {
-        self.buf.surplus_mut()
+    fn blank(&self) -> usize {
+        self.capacity().saturating_sub(self.len())
     }
 
     #[inline]
-    fn put(&mut self, o: u8) -> Option<Error> {
-        self.put_check()?;
-        self.buf.put(o)
-    }
-
-    #[inline]
-    fn put_repeat(&mut self, cnt: usize, o: u8) -> Option<Error> {
-        self.put_check()?;
-        if self.buf.len() + cnt >= self.buf_size {
-            self.inner.put_all(&self.buf)?;
-            self.buf.clear();
-            self.inner.put_repeat(cnt, o)
+    fn put_u8(&mut self, o: u8) -> bool {
+        if self.is_blank() {
+            self.inner.push(o);
+            true
         } else {
-            self.buf.put_repeat(cnt, o)
+            false
         }
     }
 
     #[inline]
-    fn put_all(&mut self, o: &[u8]) -> Option<Error> {
-        self.put_check()?;
-        if self.buf.len() + o.len() >= self.buf_size {
-            self.inner.put_all(&self.buf)?;
-            self.buf.clear();
-            self.inner.put_all(o)
+    fn put_exact(&mut self, o: &[u8]) -> bool {
+        if self.blank() >= o.len() {
+            self.inner.extend_from_slice(o);
+            true
         } else {
-            self.buf.put_all(o)
+            false
+        }
+    }
+
+    #[inline]
+    fn put_repeat(&mut self, n: usize, o: u8) -> bool {
+        if self.blank() >= n {
+            self.inner.resize(self.inner.len() + n, o);
+            true
+        } else {
+            false
         }
     }
 }
